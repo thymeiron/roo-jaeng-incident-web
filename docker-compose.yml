@@ -1,0 +1,51 @@
+version: "3.8"
+
+services:
+
+  postgres:
+    image: postgres:16
+    container_name: incident-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: incidentdb
+      POSTGRES_USER: incident
+      POSTGRES_PASSWORD: StrongPasswordHere
+    volumes:
+      - ./postgres:/var/lib/postgresql/data
+    networks:
+      - glpi_default
+
+  incident-api:
+    image: python:3.11-slim
+    container_name: incident-api
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - ./app:/app
+    command: bash -c "pip install fastapi uvicorn psycopg2-binary sqlalchemy && uvicorn main:app --host 0.0.0.0 --port 8000"
+    environment:
+      DB_HOST: postgres
+      DB_NAME: incidentdb
+      DB_USER: incident
+      DB_PASS: StrongPasswordHere
+      SLACK_SIGNING_SECRET: "054922c19ed73d94d4e813f83264d3d5"
+      SLACK_ZABBIX_CHANNEL_ID: "C078K2X4TJL"
+    depends_on:
+      - postgres
+    networks:
+      - glpi_default
+
+  incident-web-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: incident-web-frontend
+    restart: always
+    networks:
+      - glpi_default
+    depends_on:
+      - incident-api
+
+networks:
+  glpi_default:
+    external: true
