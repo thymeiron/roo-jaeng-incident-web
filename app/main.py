@@ -1,3 +1,4 @@
+import re
 import os
 import json
 import hmac
@@ -174,6 +175,24 @@ def extract_slack_message_text(event: dict) -> str:
 
     return "\n".join([p for p in parts if p])
 
+def get_slack_message_event(event: dict) -> dict:
+    """
+    Slack normal message:
+      event.attachments
+
+    Slack edited message:
+      event.subtype = message_changed
+      event.message.attachments
+    """
+    if not event:
+        return {}
+
+    if event.get("subtype") == "message_changed" and isinstance(event.get("message"), dict):
+        return event.get("message") or {}
+
+    return event
+
+
 def parse_zabbix_slack_text(text: str) -> dict:
     result = {
         "event_id": None,
@@ -198,6 +217,15 @@ def parse_zabbix_slack_text(text: str) -> dict:
             result["severity"] = line.split(":", 1)[1].strip()
 
         elif lower.startswith("problem:"):
+            result["title"] = line.split(":", 1)[1].strip()
+
+        elif lower.startswith("resolved:"):
+            result["title"] = line.split(":", 1)[1].strip()
+
+        elif lower.startswith("recovery:"):
+            result["title"] = line.split(":", 1)[1].strip()
+
+        elif lower.startswith("ok:"):
             result["title"] = line.split(":", 1)[1].strip()
 
         elif lower.startswith("trigger:") and not result["title"]:
@@ -438,6 +466,131 @@ def slack_webhook(payload: dict):
         }
     finally:
         db.close()
+def normalize_zabbix_title(title: str) -> str:
+    if not title:
+        return ""
+
+    clean = str(title).replace("*", "").strip()
+
+    # Remove common Zabbix prefixes
+    # Problem: XXX -> XXX
+    # Resolved: XXX -> XXX
+    clean = re.sub(r"^(problem|resolved|recovery|ok)\s*:\s*", "", clean, flags=re.IGNORECASE)
+
+    # Example:
+    # Resolved in 2m 0s: Problem: HSVCRP01 - CPU Utilization Reach Up 85%
+    # -> Problem: HSVCRP01 - CPU Utilization Reach Up 85%
+    if clean.lower().startswith("resolved in ") and ":" in clean:
+        clean = clean.split(":", 1)[1].strip()
+
+    # Remove prefix again after "Resolved in ..."
+    clean = re.sub(r"^(problem|resolved|recovery|ok)\s*:\s*", "", clean, flags=re.IGNORECASE)
+
+    # Remove bracket text:
+    # HSVCRP01 [HSVCRP01] -> HSVCRP01
+    clean = re.sub(r"\s*\[[^\]]+\]\s*", " ", clean)
+
+    # Support title format:
+    # HSVCRP01 - CPU Utilization Reach Up 85%
+    # -> CPU Utilization Reach Up 85%
+    clean = re.sub(r"^[A-Za-z0-9._-]+\s*-\s*", "", clean)
+
+    # Support title format:
+    # Disk I/O is overloaded on HSVCRP01
+    # -> Disk I/O is overloaded
+    clean = re.sub(r"\s+on\s+[A-Za-z0-9._-]+\s*$", "", clean, flags=re.IGNORECASE)
+
+    clean = clean.replace("%", " percent")
+    clean = re.sub(r"\s+", " ", clean).strip().lower()
+
+    return clean
+
+
+def normalize_zabbix_host(host: str) -> str:
+    if not host:
+        return ""
+
+    clean = str(host).replace("*", "").strip()
+
+    # Example:
+    # HSVCRP01 [HSVCRP01] -> HSVCRP01
+    clean = re.sub(r"\s*\[[^\]]+\]\s*", "", clean)
+
+    # Use first token only
+    clean = clean.strip().split()[0] if clean.strip() else ""
+
+    return clean.upper()
+
+
+def is_zabbix_resolved_alert(full_text: str) -> bool:
+    if not full_text:
+        return False
+
+    text = full_text.lower()
+
+    resolved_keywords = [
+        "resolved:",
+        "resolved in ",
+        "recovery:",
+        "problem has been resolved",
+        "event value: ok",
+        "trigger status: ok",
+        "ok:",
+    ]
+
+    return any(keyword in text for keyword in resolved_keywords)
+
+
+def close_open_tickets_by_host_title(host: str, title: str, resolved_detail: str):
+    normalized_host = normalize_zabbix_host(host)
+    normalized_title = normalize_zabbix_title(title)
+
+    if not normalized_host or not normalized_title:
+        return []
+
+    db = SessionLocal()
+    try:
+        open_tickets = (
+            db.query(TicketDB)
+            .filter(TicketDB.status != "Closed")
+            .filter(TicketDB.source.in_(["zabbix", "slack_zabbix"]))
+            .all()
+        )
+
+        matched_tickets = []
+
+        for ticket in open_tickets:
+            ticket_host = normalize_zabbix_host(ticket.host or "")
+            ticket_title = normalize_zabbix_title(ticket.title or "")
+
+            if ticket_host == normalized_host and ticket_title == normalized_title:
+                matched_tickets.append(ticket)
+
+        closed_ids = []
+        now = datetime.now()
+
+        for ticket in matched_tickets:
+            ticket.status = "Closed"
+            ticket.updated_at = now
+            closed_ids.append(ticket.id)
+
+            comment = CommentDB(
+                ticket_id=ticket.id,
+                comment="Auto closed by Zabbix resolved alert.\n\n" + resolved_detail,
+                created_at=now,
+            )
+            db.add(comment)
+
+        db.commit()
+        return closed_ids
+
+    except Exception:
+        db.rollback()
+        raise
+
+    finally:
+        db.close()
+
 
 @app.post("/api/slack/events")
 async def slack_events(request: Request):
@@ -468,6 +621,17 @@ async def slack_events(request: Request):
         return {"ok": True}
 
     event = payload.get("event", {})
+    message_event = get_slack_message_event(event)
+
+    print("DEBUG_SLACK_EVENT_HEAD", {
+        "event_type": event.get("type"),
+        "subtype": event.get("subtype"),
+        "has_message": isinstance(event.get("message"), dict),
+        "event_text": (event.get("text") or "")[:120],
+        "message_text": ((event.get("message") or {}).get("text") or "")[:120] if isinstance(event.get("message"), dict) else "",
+        "event_title": event.get("attachments", [{}])[0].get("title") if event.get("attachments") else "",
+        "message_title": (event.get("message", {}).get("attachments", [{}])[0].get("title") if isinstance(event.get("message"), dict) and event.get("message", {}).get("attachments") else ""),
+    }, flush=True)
 
     if event.get("type") != "message":
         return {"ok": True}
@@ -475,7 +639,6 @@ async def slack_events(request: Request):
     subtype = event.get("subtype")
 
     ignored_subtypes = [
-        "message_changed",
         "message_deleted",
         "channel_join",
         "channel_leave",
@@ -488,9 +651,9 @@ async def slack_events(request: Request):
     if subtype in ignored_subtypes:
         return {"ok": True, "ignored": subtype}
 
-    text = extract_slack_message_text(event)
-    channel = event.get("channel", "")
-    ts = event.get("ts", "")
+    text = extract_slack_message_text(message_event)
+    channel = message_event.get("channel") or event.get("channel", "")
+    ts = message_event.get("ts") or event.get("ts", "")
 
     if not text.strip():
         return {"ok": True, "ignored": "empty_text"}
@@ -527,6 +690,42 @@ async def slack_events(request: Request):
         return {"ok": True, "ignored": "wrong_channel"}
 
     parsed = parse_zabbix_slack_text(text)
+
+    print("=== ZABBIX EVENT DEBUG ===", flush=True)
+    print("RAW TEXT:", text, flush=True)
+    print("PARSED:", parsed, flush=True)
+    print("IS_RESOLVED:", is_zabbix_resolved_alert(text), flush=True)
+    print("==========================", flush=True)
+
+    alert_title = parsed.get("title") or "Zabbix Alert"
+    alert_host = parsed.get("host") or "-"
+    alert_detail = parsed.get("detail") or text
+
+    if is_zabbix_resolved_alert(text):
+        print("=== RESOLVED CLOSE DEBUG ===", flush=True)
+        print("ALERT_HOST:", alert_host, flush=True)
+        print("ALERT_TITLE:", alert_title, flush=True)
+        print("NORM_HOST:", normalize_zabbix_host(alert_host), flush=True)
+        print("NORM_TITLE:", normalize_zabbix_title(alert_title), flush=True)
+    
+        closed_ticket_ids = close_open_tickets_by_host_title(
+            host=alert_host,
+            title=alert_title,
+            resolved_detail=alert_detail,
+        )
+    
+        print("CLOSED_IDS:", closed_ticket_ids, flush=True)
+        print("CLOSED_COUNT:", len(closed_ticket_ids), flush=True)
+        print("============================", flush=True)
+    
+        return {
+                "ok": True,
+                "action": "auto_closed_by_resolved_alert",
+                "closed_ticket_ids": closed_ticket_ids,
+                "closed_count": len(closed_ticket_ids),
+                "host": normalize_zabbix_host(alert_host),
+                "title": normalize_zabbix_title(alert_title),
+            }
 
     if parsed.get("event_id"):
         external_id = f"zabbix:{parsed['event_id']}"
