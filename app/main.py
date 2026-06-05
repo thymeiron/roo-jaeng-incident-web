@@ -6,20 +6,11 @@ import hashlib
 import time
 from datetime import datetime
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
-from sqlalchemy import (
-    create_engine,
-    Column,
-    Integer,
-    String,
-    Text,
-    DateTime,
-    ForeignKey,
-    JSON,
-)
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey, Float, JSON, text
+from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
 
 DB_HOST = os.getenv("DB_HOST")
@@ -37,6 +28,15 @@ engine = create_engine(
 
 SessionLocal = sessionmaker(bind=engine)
 
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
 Base = declarative_base()
 
 
@@ -51,6 +51,8 @@ class TicketDB(Base):
     host = Column(String)
     source = Column(String)
     assigned_to = Column(String)
+    work_hours = Column(Float)
+    work_count = Column(Integer, default=1)
     created_at = Column(DateTime)
     updated_at = Column(DateTime)
 
@@ -82,6 +84,8 @@ class TicketCreate(BaseModel):
     host: str = ""
     source: str = "manual"
     assigned_to: str = ""
+    work_hours: float | None = None
+    work_count: int | None = 1
 
 
 class StatusUpdate(BaseModel):
@@ -90,6 +94,8 @@ class StatusUpdate(BaseModel):
 
 class AssignUpdate(BaseModel):
     assigned_to: str
+    work_hours: float | None = None
+    work_count: int | None = 1
 
 
 class CommentCreate(BaseModel):
@@ -278,6 +284,10 @@ def get_tickets():
                 "host": r.host,
                 "source": r.source,
                 "assigned_to": r.assigned_to,
+                "work_hours": r.work_hours,
+                "work_count": r.work_count,
+            "work_hours": r.work_hours,
+            "work_count": r.work_count,
                 "created_at": str(r.created_at),
                 "updated_at": str(r.updated_at),
             }
@@ -287,46 +297,96 @@ def get_tickets():
         db.close()
 
 
-@app.get("/api/tickets/{ticket_id}")
-def get_ticket(ticket_id: int):
+
+
+
+
+@app.put("/api/tickets/{ticket_id}")
+async def update_ticket(ticket_id: int, payload: dict):
     db = SessionLocal()
     try:
-        ticket = db.query(TicketDB).filter(TicketDB.id == ticket_id).first()
+        row = db.execute(
+            text("SELECT id FROM tickets WHERE id = :id"),
+            {"id": ticket_id},
+        ).fetchone()
 
-        if not ticket:
-            raise HTTPException(status_code=404, detail="ticket not found")
+        if not row:
+            raise HTTPException(status_code=404, detail="Ticket not found")
 
-        comments = (
-            db.query(CommentDB)
-            .filter(CommentDB.ticket_id == ticket_id)
-            .order_by(CommentDB.id.asc())
-            .all()
-        )
+        allowed_fields = [
+            "title",
+            "detail",
+            "severity",
+            "status",
+            "host",
+            "source",
+            "assigned_to",
+            "work_hours",
+            "work_count",
+        ]
 
-        return {
-            "id": ticket.id,
-            "title": ticket.title,
-            "detail": ticket.detail,
-            "severity": ticket.severity,
-            "status": ticket.status,
-            "host": ticket.host,
-            "source": ticket.source,
-            "assigned_to": ticket.assigned_to,
-            "created_at": str(ticket.created_at),
-            "updated_at": str(ticket.updated_at),
-            "comments": [
-                {
-                    "id": c.id,
-                    "comment": c.comment,
-                    "created_by": c.created_by,
-                    "created_at": str(c.created_at),
-                }
-                for c in comments
-            ],
-        }
+        update_fields = [field for field in allowed_fields if field in payload]
+
+        if update_fields:
+            set_clause = ", ".join([f"{field} = :{field}" for field in update_fields])
+            set_clause = set_clause + ", updated_at = :updated_at"
+
+            params = {field: payload[field] for field in update_fields}
+            params["id"] = ticket_id
+            params["updated_at"] = datetime.utcnow()
+
+            db.execute(
+                text(f"UPDATE tickets SET {set_clause} WHERE id = :id"),
+                params,
+            )
+            db.commit()
+
+        result = db.execute(
+            text("""
+                SELECT id, title, detail, severity, status, host, source,
+                       assigned_to, work_hours, work_count, created_at, updated_at
+                FROM tickets
+                WHERE id = :id
+            """),
+            {"id": ticket_id},
+        ).mappings().fetchone()
+
+        return dict(result)
     finally:
         db.close()
 
+@app.get("/api/tickets/{ticket_id}")
+async def get_ticket(ticket_id: int):
+    db = SessionLocal()
+    try:
+        ticket = db.execute(
+            text("""
+                SELECT id, title, detail, severity, status, host, source,
+                       assigned_to, work_hours, work_count, created_at, updated_at
+                FROM tickets
+                WHERE id = :id
+            """),
+            {"id": ticket_id},
+        ).mappings().fetchone()
+
+        if not ticket:
+            raise HTTPException(status_code=404, detail="Ticket not found")
+
+        comments = db.execute(
+            text("""
+                SELECT id, ticket_id, comment, created_by, created_at
+                FROM comments
+                WHERE ticket_id = :ticket_id
+                ORDER BY created_at DESC
+            """),
+            {"ticket_id": ticket_id},
+        ).mappings().fetchall()
+
+        data = dict(ticket)
+        data["comments"] = [dict(c) for c in comments]
+        return data
+    finally:
+        db.close()
 
 @app.post("/api/tickets")
 def create_ticket(ticket: TicketCreate):
@@ -342,6 +402,8 @@ def create_ticket(ticket: TicketCreate):
             host=ticket.host,
             source=ticket.source,
             assigned_to=ticket.assigned_to,
+            work_hours=ticket.work_hours,
+            work_count=ticket.work_count or 1,
             created_at=now,
             updated_at=now,
         )
@@ -391,6 +453,10 @@ def update_assign(ticket_id: int, data: AssignUpdate):
             raise HTTPException(status_code=404, detail="ticket not found")
 
         ticket.assigned_to = data.assigned_to
+        if hasattr(data, 'work_hours'):
+            ticket.work_hours = data.work_hours
+        if hasattr(data, 'work_count'):
+            ticket.work_count = data.work_count or 1
         ticket.updated_at = datetime.now()
 
         db.commit()
@@ -398,41 +464,83 @@ def update_assign(ticket_id: int, data: AssignUpdate):
         return {
             "id": ticket.id,
             "assigned_to": ticket.assigned_to,
+            "work_hours": ticket.work_hours,
+            "work_count": ticket.work_count,
             "message": "assigned updated",
         }
     finally:
         db.close()
 
 
+
 @app.post("/api/tickets/{ticket_id}/comments")
-def add_comment(ticket_id: int, data: CommentCreate):
+async def add_ticket_comment(ticket_id: int, payload: dict):
     db = SessionLocal()
     try:
-        ticket = db.query(TicketDB).filter(TicketDB.id == ticket_id).first()
+        row = db.execute(
+            text("SELECT id FROM tickets WHERE id = :id"),
+            {"id": ticket_id},
+        ).fetchone()
 
-        if not ticket:
-            raise HTTPException(status_code=404, detail="ticket not found")
+        if not row:
+            raise HTTPException(status_code=404, detail="Ticket not found")
 
-        row = CommentDB(
-            ticket_id=ticket_id,
-            comment=data.comment,
-            created_by=data.created_by,
-            created_at=datetime.now(),
+        comment = (
+            payload.get("comment")
+            or payload.get("body")
+            or payload.get("note")
+            or ""
         )
 
-        ticket.updated_at = datetime.now()
+        created_by = (
+            payload.get("created_by")
+            or payload.get("author")
+            or "IDS Support"
+        )
 
-        db.add(row)
+        comment = str(comment).strip()
+        created_by = str(created_by).strip() or "IDS Support"
+
+        if not comment:
+            raise HTTPException(status_code=400, detail="Comment is required")
+
+        db.execute(
+            text("""
+                INSERT INTO comments (ticket_id, comment, created_by, created_at)
+                VALUES (:ticket_id, :comment, :created_by, :created_at)
+            """),
+            {
+                "ticket_id": ticket_id,
+                "comment": comment,
+                "created_by": created_by,
+                "created_at": datetime.utcnow(),
+            },
+        )
+
+        db.execute(
+            text("UPDATE tickets SET updated_at = :updated_at WHERE id = :id"),
+            {
+                "id": ticket_id,
+                "updated_at": datetime.utcnow(),
+            },
+        )
+
         db.commit()
-        db.refresh(row)
 
-        return {
-            "id": row.id,
-            "message": "comment added",
-        }
+        result = db.execute(
+            text("""
+                SELECT id, ticket_id, comment, created_by, created_at
+                FROM comments
+                WHERE ticket_id = :ticket_id
+                ORDER BY created_at DESC
+                LIMIT 1
+            """),
+            {"ticket_id": ticket_id},
+        ).mappings().fetchone()
+
+        return dict(result)
     finally:
         db.close()
-
 
 @app.post("/api/slack/webhook")
 def slack_webhook(payload: dict):
@@ -452,6 +560,8 @@ def slack_webhook(payload: dict):
             host=host,
             source="slack",
             assigned_to="",
+            work_hours=None,
+            work_count=1,
             created_at=now,
             updated_at=now,
         )
@@ -563,7 +673,19 @@ def close_open_tickets_by_host_title(host: str, title: str, resolved_detail: str
             ticket_host = normalize_zabbix_host(ticket.host or "")
             ticket_title = normalize_zabbix_title(ticket.title or "")
 
-            if ticket_host == normalized_host and ticket_title == normalized_title:
+            host_match = (
+                ticket_host == normalized_host
+                or normalized_host in ticket_host
+                or ticket_host in normalized_host
+            )
+
+            title_match = (
+                ticket_title == normalized_title
+                or normalized_title in ticket_title
+                or ticket_title in normalized_title
+            )
+
+            if host_match and title_match:
                 matched_tickets.append(ticket)
 
         closed_ids = []
@@ -623,16 +745,6 @@ async def slack_events(request: Request):
     event = payload.get("event", {})
     message_event = get_slack_message_event(event)
 
-    print("DEBUG_SLACK_EVENT_HEAD", {
-        "event_type": event.get("type"),
-        "subtype": event.get("subtype"),
-        "has_message": isinstance(event.get("message"), dict),
-        "event_text": (event.get("text") or "")[:120],
-        "message_text": ((event.get("message") or {}).get("text") or "")[:120] if isinstance(event.get("message"), dict) else "",
-        "event_title": event.get("attachments", [{}])[0].get("title") if event.get("attachments") else "",
-        "message_title": (event.get("message", {}).get("attachments", [{}])[0].get("title") if isinstance(event.get("message"), dict) and event.get("message", {}).get("attachments") else ""),
-    }, flush=True)
-
     if event.get("type") != "message":
         return {"ok": True}
 
@@ -690,42 +802,29 @@ async def slack_events(request: Request):
         return {"ok": True, "ignored": "wrong_channel"}
 
     parsed = parse_zabbix_slack_text(text)
-
-    print("=== ZABBIX EVENT DEBUG ===", flush=True)
-    print("RAW TEXT:", text, flush=True)
-    print("PARSED:", parsed, flush=True)
-    print("IS_RESOLVED:", is_zabbix_resolved_alert(text), flush=True)
-    print("==========================", flush=True)
+    closed_ticket_ids = []
 
     alert_title = parsed.get("title") or "Zabbix Alert"
     alert_host = parsed.get("host") or "-"
     alert_detail = parsed.get("detail") or text
 
     if is_zabbix_resolved_alert(text):
-        print("=== RESOLVED CLOSE DEBUG ===", flush=True)
-        print("ALERT_HOST:", alert_host, flush=True)
-        print("ALERT_TITLE:", alert_title, flush=True)
-        print("NORM_HOST:", normalize_zabbix_host(alert_host), flush=True)
-        print("NORM_TITLE:", normalize_zabbix_title(alert_title), flush=True)
-    
-        closed_ticket_ids = close_open_tickets_by_host_title(
-            host=alert_host,
-            title=alert_title,
-            resolved_detail=alert_detail,
-        )
-    
-        print("CLOSED_IDS:", closed_ticket_ids, flush=True)
-        print("CLOSED_COUNT:", len(closed_ticket_ids), flush=True)
         print("============================", flush=True)
-    
+
+        closed_ticket_ids = close_open_tickets_by_host_title(
+            alert_host,
+            alert_title,
+            alert_detail,
+        )
+
         return {
-                "ok": True,
-                "action": "auto_closed_by_resolved_alert",
-                "closed_ticket_ids": closed_ticket_ids,
-                "closed_count": len(closed_ticket_ids),
-                "host": normalize_zabbix_host(alert_host),
-                "title": normalize_zabbix_title(alert_title),
-            }
+            "ok": True,
+            "action": "auto_closed_by_resolved_alert",
+            "closed_ticket_ids": closed_ticket_ids,
+            "closed_count": len(closed_ticket_ids),
+            "host": normalize_zabbix_host(alert_host),
+            "title": normalize_zabbix_title(alert_title),
+        }
 
     if parsed.get("event_id"):
         external_id = f"zabbix:{parsed['event_id']}"
@@ -757,6 +856,8 @@ async def slack_events(request: Request):
             host=parsed.get("host") or "-",
             source="slack_zabbix",
             assigned_to="",
+            work_hours=None,
+            work_count=1,
             external_id=external_id,
             slack_channel=channel,
             slack_ts=ts,

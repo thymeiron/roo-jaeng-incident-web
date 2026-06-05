@@ -1,25 +1,50 @@
-# Python
-__pycache__/
-*.pyc
+# env / secrets
 .env
-.venv/
+.env.*
+*.key
+*.pem
+*.crt
+certs/
+nginx/certs/
 
-# Node / Next.js
+# node / next
 frontend/node_modules/
 frontend/.next/
 frontend/out/
-frontend/.env.local
+frontend/.turbo/
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
 
-# Logs
+# python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+venv/
+
+# backup files
+*.bak
+*.bak-*
+*.bak.*
+*.backup
+*.old
+*.orig
+
+# logs
 *.log
+logs/
 
-# OS / editor
+# database / data dump
+*.sql
+*.dump
+*.tar
+*.tar.gz
+*.zip
+
+# OS/editor
 .DS_Store
 .vscode/
 .idea/
-
-# Backup files
-*.bak*
-
-# PostgreSQL data
-postgres/

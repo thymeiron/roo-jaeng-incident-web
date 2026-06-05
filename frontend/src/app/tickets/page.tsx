@@ -1,180 +1,349 @@
-import Link from "next/link";
+import InlineDetailEditor from "./InlineDetailEditor";
 
 export const dynamic = "force-dynamic";
 
 type Ticket = {
   id: number;
   title: string;
-  detail?: string;
-  severity?: string;
-  status: string;
-  host?: string;
-  source?: string;
-  assigned_to?: string;
-  created_at?: string;
-  updated_at?: string;
+  detail?: string | null;
+  severity?: string | null;
+  status?: string | null;
+  host?: string | null;
+  source?: string | null;
+  assigned_to?: string | null;
+  work_hours?: number | null;
+  work_count?: number | null;
+  created_at?: string | null;
+  updated_at?: string | null;
 };
 
-type PageProps = {
-  searchParams?: Promise<{
-    status?: string;
-    assigned_to?: string;
-    source?: string;
-  }> | {
-    status?: string;
-    assigned_to?: string;
-    source?: string;
-  };
-};
+const API_BASE =
+  process.env.NEXT_PUBLIC_API_BASE_URL ||
+  process.env.API_BASE_URL ||
+  "http://incident-api:8000";
 
-async function getTickets(): Promise<Ticket[]> {
-  const apiBase = process.env.INTERNAL_API_URL || "http://incident-api:8000";
+function cleanTitle(value?: string | null) {
+  if (!value) return "";
 
-  const res = await fetch(`${apiBase}/api/tickets`, {
-    cache: "no-store",
-  });
-
-  if (!res.ok) {
-    throw new Error("Failed to fetch tickets");
-  }
-
-  return res.json();
+  return value
+    .replace(/^Problem:\s*/i, "")
+    .replace(/^Resolved.*?:\s*/i, "")
+    .replace(/\s+on\s+[A-Z0-9_-]+$/i, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
 }
 
-function formatDateTime(value?: string) {
+function cleanHost(value?: string | null) {
+  if (!value) return "";
+  return value
+    .replace(/\[.*?\]/g, "")
+    .trim()
+    .toLowerCase();
+}
+
+function formatDate(value?: string | null) {
   if (!value) return "-";
 
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value;
 
-  return date.toLocaleString("en-GB", {
+  return d.toLocaleString("en-GB", {
     timeZone: "Asia/Bangkok",
-    year: "numeric",
-    month: "2-digit",
     day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
     hour: "2-digit",
     minute: "2-digit",
   });
 }
 
-function buildQuery(params: Record<string, string | undefined>) {
-  const search = new URLSearchParams();
 
-  for (const [key, value] of Object.entries(params)) {
-    if (value) search.set(key, value);
-  }
-
-  const query = search.toString();
-  return query ? `?${query}` : "";
+function shortDetail(value?: string | null) {
+  if (!value) return "-";
+  const clean = value.replace(/\s+/g, " ").trim();
+  return clean.length > 120 ? clean.slice(0, 120) + "..." : clean;
 }
 
-export default async function TicketsPage({ searchParams }: PageProps) {
-  const params = await searchParams;
 
-  const selectedStatus = params?.status || "";
-  const selectedAssignedTo = params?.assigned_to || "";
-  const selectedSource = params?.source || "";
+function statusAccent(status?: string | null) {
+  const s = (status || "").toLowerCase();
+
+  if (s === "closed") return "#16a34a";
+  if (s === "in progress") return "#ea580c";
+  return "#2563eb";
+}
+
+function statusAccentSoft(status?: string | null) {
+  const s = (status || "").toLowerCase();
+
+  if (s === "closed") return "#dcfce7";
+  if (s === "in progress") return "#ffedd5";
+  return "#dbeafe";
+}
+
+function statusPillStyle(status?: string | null) {
+  const s = (status || "").toLowerCase();
+
+  if (s === "closed") {
+    return {
+      background: "#dcfce7",
+      color: "#166534",
+      border: "1px solid #bbf7d0",
+    };
+  }
+
+  if (s === "in progress") {
+    return {
+      background: "#ffedd5",
+      color: "#c2410c",
+      border: "1px solid #fed7aa",
+    };
+  }
+
+  if (s === "new") {
+    return {
+      background: "#dbeafe",
+      color: "#1d4ed8",
+      border: "1px solid #bfdbfe",
+    };
+  }
+
+  return {
+    background: "#f1f5f9",
+    color: "#475569",
+    border: "1px solid #cbd5e1",
+  };
+}
+
+function buildTitle(params: {
+  status?: string;
+  assigned_to?: string;
+  source?: string;
+  host?: string;
+  title?: string;
+  risk?: string;
+  status_not?: string;
+}) {
+  const parts: string[] = [];
+
+  if (params.status) parts.push(`Status: ${params.status}`);
+  if (params.status_not) parts.push(`Status not: ${params.status_not}`);
+  if (params.assigned_to) parts.push(`Assigned: ${params.assigned_to}`);
+  if (params.source) parts.push(`Source: ${params.source}`);
+  if (params.host) parts.push(`Host: ${params.host}`);
+  if (params.title) parts.push(`Alert: ${params.title}`);
+  if (params.risk === "repeated") parts.push("Repeated Zabbix Risk");
+
+  if (parts.length === 0) return "Tickets";
+  return `Tickets - ${parts.join(" | ")}`;
+}
+
+async function getTickets(): Promise<Ticket[]> {
+  try {
+    const res = await fetch(`${API_BASE}/api/tickets`, {
+      cache: "no-store",
+    });
+
+    if (!res.ok) return [];
+    return await res.json();
+  } catch (err) {
+    console.error("Failed to fetch tickets", err);
+    return [];
+  }
+}
+
+export default async function TicketsPage({
+  searchParams,
+}: {
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const sp = (await searchParams) || {};
+
+  const status = typeof sp.status === "string" ? sp.status : undefined;
+  const statusNot = typeof sp.status_not === "string" ? sp.status_not : undefined;
+  const assignedTo = typeof sp.assigned_to === "string" ? sp.assigned_to : undefined;
+  const source = typeof sp.source === "string" ? sp.source : undefined;
+  const host = typeof sp.host === "string" ? sp.host : undefined;
+  const title = typeof sp.title === "string" ? sp.title : undefined;
+  const risk = typeof sp.risk === "string" ? sp.risk : undefined;
 
   const tickets = await getTickets();
 
-  const filteredTickets = tickets.filter((ticket) => {
-    if (selectedStatus && ticket.status !== selectedStatus) return false;
+  let filteredTickets = [...tickets];
 
-    if (selectedAssignedTo) {
-      const assignee = ticket.assigned_to?.trim() || "Unassigned";
-      if (assignee !== selectedAssignedTo) return false;
+  if (status) {
+    filteredTickets = filteredTickets.filter((t) => t.status === status);
+  }
+
+  if (statusNot) {
+    filteredTickets = filteredTickets.filter((t) => t.status !== statusNot);
+  }
+
+  if (assignedTo) {
+    filteredTickets = filteredTickets.filter((t) => t.assigned_to === assignedTo);
+  }
+
+  if (source) {
+    filteredTickets = filteredTickets.filter((t) => t.source === source);
+  }
+
+  if (host) {
+    filteredTickets = filteredTickets.filter(
+      (t) => cleanHost(t.host) === host.toLowerCase()
+    );
+  }
+
+  if (title) {
+    filteredTickets = filteredTickets.filter(
+      (t) => cleanTitle(t.title) === title.toLowerCase()
+    );
+  }
+
+  if (risk === "repeated") {
+    const zabbixTickets = filteredTickets.filter((t) => t.source === "slack_zabbix");
+    const counts: Record<string, number> = {};
+
+    for (const t of zabbixTickets) {
+      const key = `${cleanHost(t.host)}|${cleanTitle(t.title)}`;
+      counts[key] = (counts[key] || 0) + 1;
     }
 
-    if (selectedSource) {
-      const source = ticket.source || "";
-      if (source !== selectedSource) return false;
-    }
+    filteredTickets = zabbixTickets.filter((t) => {
+      const key = `${cleanHost(t.host)}|${cleanTitle(t.title)}`;
+      return counts[key] >= 3;
+    });
+  }
 
-    return true;
-  });
+  filteredTickets.sort((a, b) => (b.id || 0) - (a.id || 0));
 
-  const titleParts = ["Tickets"];
-  if (selectedStatus) titleParts.push(selectedStatus);
-  if (selectedAssignedTo) titleParts.push(`Assigned: ${selectedAssignedTo}`);
-  if (selectedSource) titleParts.push(`Source: ${selectedSource}`);
+  const allUrl = "/tickets";
+  const newUrl = "/tickets?status=New";
+  const inProgressUrl = "/tickets?status=In%20Progress";
+  const closedUrl = "/tickets?status=Closed";
 
   return (
-    <main style={{ padding: "24px", fontFamily: "Arial, sans-serif" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "18px" }}>
+    <main className="rj-page" style={{ padding: "28px", background: "#ffffff", minHeight: "100vh" }}>
+      <a href="/" style={{ color: "#0f172a", textDecoration: "none" }}>
+        ← Back to Dashboard
+      </a>
+
+      <section
+        className="rj-header rj-header-main"
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          gap: "16px",
+          alignItems: "flex-start",
+          marginTop: "20px",
+          marginBottom: "24px",
+        }}
+      >
         <div>
-          <Link href="/" style={{ color: "#111827", textDecoration: "none" }}>
-            ← Back to Dashboard
-          </Link>
-          <h1 style={{ margin: "10px 0 4px", fontSize: "22px" }}>
-            {titleParts.join(" - ")}
+          <h1 style={{ margin: 0, fontSize: "24px" }}>
+            {buildTitle({
+              status,
+              assigned_to: assignedTo,
+              source,
+              host,
+              title,
+              risk,
+              status_not: statusNot,
+            })}
           </h1>
-          <p style={{ margin: 0, color: "#475569" }}>
+
+          <p style={{ marginTop: "8px", color: "#334155" }}>
             Showing {filteredTickets.length} of {tickets.length} tickets
           </p>
         </div>
 
-        <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
-          <Link href="/tickets" style={buttonStyle}>All</Link>
-          <Link href="/tickets?status=New" style={buttonStyle}>New</Link>
-          <Link href="/tickets?status=In%20Progress" style={buttonStyle}>In Progress</Link>
-          <Link href="/tickets?status=Closed" style={buttonStyle}>Closed</Link>
-          <Link href="/reports" style={buttonStyle}>Monthly Report</Link>
-          <Link href="/tickets/new" style={darkButtonStyle}>+ Create Ticket</Link>
+        <div className="rj-actions" style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+          <a href={allUrl} style={buttonStyle}>All</a>
+          <a href={newUrl} style={newFilterButtonStyle}>New</a>
+          <a href={inProgressUrl} style={inProgressFilterButtonStyle}>In Progress</a>
+          <a href={closedUrl} style={closedFilterButtonStyle}>Closed</a>
+          <a href="/reports" style={buttonStyle}>Monthly Report</a>
+          <a href="/tickets/new" style={primaryButtonStyle}>+ Create Ticket</a>
         </div>
-      </div>
+      </section>
 
-      <table style={{ width: "100%", borderCollapse: "collapse", background: "#fff" }}>
-        <thead>
-          <tr>
-            <th style={thStyle}>ID</th>
-            <th style={thStyle}>Title</th>
-            <th style={thStyle}>Host</th>
-            <th style={thStyle}>Severity</th>
-            <th style={thStyle}>Status</th>
-            <th style={thStyle}>Assigned</th>
-            <th style={thStyle}>Source</th>
-            <th style={thStyle}>Created</th>
-          </tr>
-        </thead>
-        <tbody>
-          {filteredTickets.map((ticket) => (
-            <tr key={ticket.id}>
-              <td style={tdStyle}>
-                <Link href={`/tickets/${ticket.id}`} style={{ color: "#2563eb", textDecoration: "none", fontWeight: 600 }}>
-                  {ticket.id}
-                </Link>
-              </td>
-              <td style={tdStyle}>
-                <Link href={`/tickets/${ticket.id}`} style={{ color: "#111827", textDecoration: "none" }}>
-                  {ticket.title}
-                </Link>
-              </td>
-              <td style={tdStyle}>{ticket.host || "-"}</td>
-              <td style={tdStyle}>{ticket.severity || "-"}</td>
-              <td style={tdStyle}>{ticket.status}</td>
-              <td style={tdStyle}>
-                {ticket.assigned_to ? (
-                  <Link
-                    href={`/tickets${buildQuery({ assigned_to: ticket.assigned_to })}`}
-                    style={{ color: "#2563eb", textDecoration: "none" }}
-                  >
-                    {ticket.assigned_to}
-                  </Link>
-                ) : (
-                  <Link
-                    href="/tickets?assigned_to=Unassigned"
-                    style={{ color: "#2563eb", textDecoration: "none" }}
-                  >
-                    Unassigned
-                  </Link>
-                )}
-              </td>
-              <td style={tdStyle}>{ticket.source || "-"}</td>
-              <td style={tdStyle}>{formatDateTime(ticket.created_at)}</td>
+      <div className="rj-table-wrap" style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
+          <thead>
+            <tr style={{ borderBottom: "1px solid #e2e8f0" }}>
+              <th style={{ ...thStyle, width: "58px" }}>ID</th>
+              <th style={{ ...thStyle, width: "34%" }}>Title</th>
+              <th style={{ ...thStyle, width: "11%" }}>Host</th>
+              <th style={{ ...thStyle, width: "18%" }}>Detail</th>
+              <th style={{ ...thStyle, width: "95px" }}>Status</th>
+              <th style={{ ...thStyle, width: "90px" }}>Assigned</th>
+              <th style={{ ...thStyle, width: "50px" }}>ชม/วัน</th>
+              <th style={{ ...thStyle, width: "50px" }}>งาน/วัน</th>
+              <th style={{ ...thStyle, width: "85px" }}>Source</th>
+              <th style={{ ...thStyle, width: "100px" }}>Created</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+
+          <tbody>
+            {filteredTickets.map((ticket) => (
+              <tr key={ticket.id} style={{ borderBottom: "1px solid #edf2f7", background: "#ffffff" }}>
+                <td
+                    style={{
+                      ...tdStyle,
+                      borderLeft: `4px solid ${statusAccent(ticket.status)}`,
+                      paddingLeft: "10px",
+                    }}
+                  >
+                    <a
+                      href={`/tickets/${ticket.id}`}
+                      style={{
+                        textDecoration: "none",
+                        fontWeight: 800,
+                        color: statusAccent(ticket.status),
+                      }}
+                    >
+                      {ticket.id}
+                    </a>
+                  </td>
+                <td style={tdStyle}>
+                  <a href={`/tickets/${ticket.id}`} style={{ color: "#0f172a", textDecoration: "none" }}>
+                    {ticket.title}
+                  </a>
+                </td>
+                <td style={{ ...tdStyle, whiteSpace: "normal", wordBreak: "break-word", lineHeight: 1.35 }}>{ticket.host || "-"}</td>
+                <td style={{ ...tdStyle, whiteSpace: "normal", verticalAlign: "top" }}>
+                    <InlineDetailEditor ticketId={ticket.id} initialDetail={ticket.detail} status={ticket.status} />
+                  </td>
+                <td style={tdStyle}>
+                  <span style={{ ...statusPillBase, ...statusPillStyle(ticket.status) }}>
+                    {ticket.status || "Unknown"}
+                  </span>
+                </td>
+                <td style={tdStyle}>
+                  <a
+                    href={
+                      ticket.assigned_to
+                        ? `/tickets?assigned_to=${encodeURIComponent(ticket.assigned_to)}`
+                        : "/tickets?assigned_to="
+                    }
+                    style={{
+                        textDecoration: "none",
+                        fontWeight: 700,
+                        color: statusAccent(ticket.status),
+                      }}
+                  >
+                    {ticket.assigned_to || "Unassigned"}
+                  </a>
+                </td>
+                <td style={tdStyle}>{ticket.work_hours ?? "-"}</td>
+                <td style={tdStyle}>{ticket.work_count ?? "-"}</td>
+                <td style={tdStyle}>{ticket.source || "-"}</td>
+                <td style={tdStyle}>{formatDate(ticket.created_at)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </main>
   );
 }
@@ -182,28 +351,72 @@ export default async function TicketsPage({ searchParams }: PageProps) {
 const thStyle = {
   textAlign: "left" as const,
   padding: "12px 8px",
-  borderBottom: "1px solid #ddd",
-  fontWeight: 700,
+  fontWeight: 800,
+  color: "#0f172a",
 };
 
 const tdStyle = {
-  padding: "10px 8px",
-  borderBottom: "1px solid #eee",
+  padding: "12px 8px",
+  color: "#0f172a",
   verticalAlign: "top" as const,
 };
 
-const buttonStyle = {
-  padding: "10px 16px",
-  border: "1px solid #d1d5db",
-  borderRadius: "8px",
-  color: "#111827",
+const linkStyle = {
+  color: "#1d4ed8",
   textDecoration: "none",
   fontWeight: 700,
-  background: "#fff",
 };
 
-const darkButtonStyle = {
+const buttonStyle = {
+  padding: "12px 16px",
+  borderRadius: "8px",
+  border: "1px solid #cbd5e1",
+  textDecoration: "none",
+  color: "#0f172a",
+  fontWeight: 800,
+  background: "#ffffff",
+};
+
+
+const newFilterButtonStyle = {
   ...buttonStyle,
-  background: "#0f172a",
-  color: "#fff",
+  border: "1px solid #93c5fd",
+  color: "#1d4ed8",
+  background: "#dbeafe",
+};
+
+const inProgressFilterButtonStyle = {
+  ...buttonStyle,
+  border: "1px solid #fdba74",
+  color: "#c2410c",
+  background: "#ffedd5",
+};
+
+const closedFilterButtonStyle = {
+  ...buttonStyle,
+  border: "1px solid #86efac",
+  color: "#166534",
+  background: "#dcfce7",
+};
+
+
+const primaryButtonStyle = {
+  padding: "12px 16px",
+  borderRadius: "8px",
+  border: "1px solid #020617",
+  textDecoration: "none",
+  color: "#ffffff",
+  fontWeight: 800,
+  background: "#020617",
+};
+
+
+const statusPillBase = {
+  display: "inline-block",
+  minWidth: "96px",
+  textAlign: "center" as const,
+  padding: "6px 10px",
+  borderRadius: "999px",
+  fontSize: "12px",
+  fontWeight: 900,
 };
