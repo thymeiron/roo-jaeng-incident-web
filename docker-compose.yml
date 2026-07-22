@@ -25,11 +25,17 @@ services:
     command: bash -c "pip install fastapi uvicorn psycopg2-binary sqlalchemy && uvicorn main:app --host 0.0.0.0 --port 8000"
     environment:
       DB_HOST: postgres
-      DB_NAME: incidentdb
-      DB_USER: incident
-      DB_PASS: StrongPasswordHere
-      SLACK_SIGNING_SECRET: "054922c19ed73d94d4e813f83264d3d5"
-      SLACK_ZABBIX_CHANNEL_ID: "C078K2X4TJL"
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASS: ${DB_PASS}
+      SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET}
+      SLACK_ZABBIX_CHANNEL_ID: ${SLACK_ZABBIX_CHANNEL_ID}
+      LINE_CHANNEL_SECRET: ${LINE_CHANNEL_SECRET}
+      LINE_CHANNEL_ACCESS_TOKEN: ${LINE_CHANNEL_ACCESS_TOKEN}
+      LINE_TARGET_ID: ${LINE_TARGET_ID}
+      LINE_ENABLED: ${LINE_ENABLED:-false}
+      ZABBIX_WEBHOOK_TOKEN: ${ZABBIX_WEBHOOK_TOKEN}
+      ROO_JAENG_BASE_URL: ${ROO_JAENG_BASE_URL:-https://roo-jaeng.com}
     depends_on:
       - postgres
     networks:

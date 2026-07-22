@@ -6,6 +6,9 @@ import hashlib
 import time
 import secrets
 import base64
+import logging
+import urllib.error
+import urllib.request
 from datetime import timedelta
 from datetime import datetime
 
@@ -14,6 +17,7 @@ from fastapi.responses import PlainTextResponse, JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey, Float, JSON, text, or_, cast
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
+from sqlalchemy.exc import IntegrityError
 
 
 DB_HOST = os.getenv("DB_HOST")
@@ -117,6 +121,7 @@ class CommentDB(Base):
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
+logger = logging.getLogger("uvicorn.error")
 
 
 class TicketCreate(BaseModel):
@@ -181,6 +186,131 @@ def verify_slack_signature(
     ).hexdigest()
 
     return hmac.compare_digest(my_signature, slack_signature)
+
+
+def create_ticket_record(db: Session, **values):
+    """Create and commit a ticket. Unique external IDs are returned as duplicates."""
+    external_id = values.get("external_id")
+    if external_id:
+        existing = db.query(TicketDB).filter(TicketDB.external_id == external_id).first()
+        if existing:
+            return existing, True
+
+    now = datetime.now()
+    ticket = TicketDB(
+        title=values.get("title") or "Alert",
+        detail=values.get("detail") or "",
+        severity=values.get("severity") or "Medium",
+        status="New",
+        host=values.get("host") or "-",
+        source=values.get("source") or "manual",
+        assigned_to="",
+        work_hours=None,
+        work_count=1,
+        external_id=external_id,
+        slack_channel=values.get("slack_channel"),
+        slack_ts=values.get("slack_ts"),
+        raw_payload=values.get("extra"),
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(ticket)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        if not external_id:
+            raise
+        existing = db.query(TicketDB).filter(TicketDB.external_id == external_id).first()
+        if not existing:
+            raise
+        return existing, True
+    db.refresh(ticket)
+    return ticket, False
+
+
+def close_tickets(db: Session, tickets: list[TicketDB], detail: str, extra: dict | None = None):
+    """Close existing tickets and commit before any downstream notification."""
+    now = datetime.now()
+    closed = []
+    for ticket in tickets:
+        if ticket.status == "Closed":
+            continue
+        ticket.status = "Closed"
+        ticket.updated_at = now
+        if extra is not None:
+            stored = dict(ticket.raw_payload or {})
+            stored["recovery"] = extra
+            ticket.raw_payload = stored
+        db.add(CommentDB(
+            ticket_id=ticket.id,
+            comment="Auto closed by Zabbix resolved alert.\n\n" + detail,
+            created_at=now,
+        ))
+        closed.append(ticket)
+    db.commit()
+    return closed
+
+
+def verify_line_signature(channel_secret: str, raw_body: bytes, signature: str) -> bool:
+    if not channel_secret or not signature:
+        return False
+    expected = base64.b64encode(
+        hmac.new(channel_secret.encode("utf-8"), raw_body, hashlib.sha256).digest()
+    ).decode("ascii")
+    return hmac.compare_digest(expected, signature)
+
+
+def send_line_push_message(message: str) -> bool:
+    enabled = os.getenv("LINE_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+    target_id = os.getenv("LINE_TARGET_ID", "").strip()
+    access_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
+    if not enabled or not target_id:
+        logger.info("Skipping LINE push: LINE is disabled or LINE_TARGET_ID is empty")
+        return False
+    if not access_token:
+        logger.error("LINE push failed: LINE_CHANNEL_ACCESS_TOKEN is not configured")
+        return False
+
+    body = json.dumps({"to": target_id, "messages": [{"type": "text", "text": message}]}).encode("utf-8")
+    request = urllib.request.Request(
+        "https://api.line.me/v2/bot/message/push",
+        data=body,
+        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return 200 <= response.status < 300
+    except urllib.error.HTTPError as exc:
+        logger.error("LINE push failed with HTTP status %s", exc.code)
+    except Exception as exc:
+        logger.error("LINE push failed: %s", type(exc).__name__)
+    return False
+
+
+def ticket_url(ticket_id: int) -> str:
+    base_url = os.getenv("ROO_JAENG_BASE_URL", "https://roo-jaeng.com").rstrip("/")
+    return f"{base_url}/tickets/{ticket_id}"
+
+
+def send_problem_notification(ticket: TicketDB, event: dict) -> bool:
+    return send_line_push_message(
+        "🔴 Zabbix Problem\n"
+        f"Ticket: #{ticket.id}\nHost: {event.get('host', '')}\n"
+        f"Problem: {event.get('event_name', '')}\nSeverity: {event.get('severity', '')}\n"
+        f"Time: {event.get('event_date', '')} {event.get('event_time', '')}\n"
+        f"{ticket_url(ticket.id)}"
+    )
+
+
+def send_recovery_notification(ticket: TicketDB, event: dict) -> bool:
+    return send_line_push_message(
+        "🟢 Zabbix Recovery\n"
+        f"Ticket: #{ticket.id}\nHost: {event.get('host', '')}\n"
+        f"Problem: {event.get('event_name', '')}\nStatus: Closed\n"
+        f"{ticket_url(ticket.id)}"
+    )
 
 def extract_slack_message_text(event: dict) -> str:
     parts = []
@@ -761,23 +891,8 @@ def close_open_tickets_by_host_title(host: str, title: str, resolved_detail: str
             if host_match and title_match:
                 matched_tickets.append(ticket)
 
-        closed_ids = []
-        now = datetime.now()
-
-        for ticket in matched_tickets:
-            ticket.status = "Closed"
-            ticket.updated_at = now
-            closed_ids.append(ticket.id)
-
-            comment = CommentDB(
-                ticket_id=ticket.id,
-                comment="Auto closed by Zabbix resolved alert.\n\n" + resolved_detail,
-                created_at=now,
-            )
-            db.add(comment)
-
-        db.commit()
-        return closed_ids
+        closed = close_tickets(db, matched_tickets, resolved_detail)
+        return [ticket.id for ticket in closed]
 
     except Exception:
         db.rollback()
@@ -906,48 +1021,157 @@ async def slack_events(request: Request):
 
     db = SessionLocal()
     try:
-        existing_ticket = (
-            db.query(TicketDB)
-            .filter(TicketDB.external_id == external_id)
-            .first()
-        )
-
-        if existing_ticket:
-            return {
-                "ok": True,
-                "duplicate": True,
-                "ticket_id": existing_ticket.id,
-            }
-
-        now = datetime.now()
-
-        ticket = TicketDB(
+        ticket, duplicate = create_ticket_record(
+            db,
             title=parsed.get("title") or "Zabbix Alert",
             detail=parsed.get("detail") or text,
             severity=parsed.get("severity") or "Medium",
-            status="New",
             host=parsed.get("host") or "-",
             source="slack_zabbix",
-            assigned_to="",
-            work_hours=None,
-            work_count=1,
             external_id=external_id,
             slack_channel=channel,
             slack_ts=ts,
-            raw_payload=payload,
-            created_at=now,
-            updated_at=now,
+            extra=payload,
         )
 
-        db.add(ticket)
-        db.commit()
-        db.refresh(ticket)
+        if duplicate:
+            return {
+                "ok": True,
+                "duplicate": True,
+                "ticket_id": ticket.id,
+            }
 
         return {
             "ok": True,
             "ticket_id": ticket.id,
             "external_id": external_id,
         }
+    finally:
+        db.close()
+
+
+def require_webhook_token(request: Request):
+    configured = os.getenv("ZABBIX_WEBHOOK_TOKEN", "")
+    supplied = request.headers.get("X-Webhook-Token", "")
+    if not configured or not supplied or not secrets.compare_digest(configured, supplied):
+        raise HTTPException(status_code=401, detail="Invalid webhook token")
+
+
+@app.post("/api/line/webhook")
+async def line_webhook(request: Request):
+    raw_body = await request.body()
+    signature = request.headers.get("x-line-signature", "")
+    if not verify_line_signature(os.getenv("LINE_CHANNEL_SECRET", ""), raw_body, signature):
+        raise HTTPException(status_code=401, detail="Invalid LINE signature")
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    for event in payload.get("events", []):
+        source = event.get("source") or {}
+        logger.info(
+            "LINE webhook source: type=%s groupId=%s userId=%s",
+            source.get("type"), source.get("groupId"), source.get("userId"),
+        )
+    return {"ok": True}
+
+
+@app.post("/api/line/test")
+async def line_test(request: Request):
+    require_webhook_token(request)
+    return {"ok": True, "line_sent": send_line_push_message("Roo-Jaeng LINE notification test")}
+
+
+def validate_zabbix_payload(payload: dict):
+    required = [
+        "event_id", "event_status", "event_value", "event_name", "trigger_id",
+        "host", "host_ip", "severity", "detail", "event_date", "event_time",
+    ]
+    missing = [name for name in required if payload.get(name) is None]
+    if missing:
+        raise HTTPException(status_code=422, detail=f"Missing fields: {', '.join(missing)}")
+
+
+def is_recovery_event(payload: dict) -> bool:
+    values = {str(payload.get("event_status", "")).upper(), str(payload.get("event_value", "")).upper()}
+    return bool(values & {"RESOLVED", "RECOVERY", "OK", "0"})
+
+
+def find_zabbix_recovery_ticket(db: Session, payload: dict):
+    external_id = f"zabbix:{payload['event_id']}"
+    ticket = db.query(TicketDB).filter(TicketDB.external_id == external_id).first()
+    if ticket:
+        return ticket
+
+    trigger_id = str(payload["trigger_id"])
+    normalized_host = normalize_zabbix_host(payload["host"])
+    candidates = (
+        db.query(TicketDB)
+        .filter(TicketDB.source == "zabbix", TicketDB.status != "Closed")
+        .order_by(TicketDB.created_at.desc())
+        .all()
+    )
+    for candidate in candidates:
+        zabbix = (candidate.raw_payload or {}).get("zabbix", {})
+        if (
+            str(zabbix.get("trigger_id", "")) == trigger_id
+            and normalize_zabbix_host(candidate.host or "") == normalized_host
+        ):
+            return candidate
+    return None
+
+
+@app.post("/api/zabbix/webhook")
+async def zabbix_webhook(request: Request):
+    require_webhook_token(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    validate_zabbix_payload(payload)
+
+    db = SessionLocal()
+    try:
+        if is_recovery_event(payload):
+            ticket = find_zabbix_recovery_ticket(db, payload)
+            if not ticket:
+                return {"ok": True, "action": "recovery_ticket_not_found", "line_sent": False}
+            recovery = dict(payload)
+            recovery["received_at"] = datetime.now().isoformat()
+            closed = close_tickets(db, [ticket], str(payload.get("detail", "")), recovery)
+            if not closed:
+                return {"ok": True, "action": "already_closed", "ticket_id": ticket.id, "line_sent": False}
+            line_sent = send_recovery_notification(ticket, payload)
+            return {"ok": True, "action": "closed", "ticket_id": ticket.id, "line_sent": line_sent}
+
+        status_values = {str(payload.get("event_status", "")).upper(), str(payload.get("event_value", "")).upper()}
+        if "PROBLEM" not in status_values and "1" not in status_values:
+            raise HTTPException(status_code=422, detail="Unsupported Zabbix event status")
+
+        ticket, duplicate = create_ticket_record(
+            db,
+            title=str(payload["event_name"]),
+            detail=str(payload["detail"]),
+            severity=str(payload["severity"]),
+            host=str(payload["host"]),
+            source="zabbix",
+            external_id=f"zabbix:{payload['event_id']}",
+            extra={"zabbix": payload},
+        )
+        if duplicate:
+            return {"ok": True, "duplicate": True, "ticket_id": ticket.id, "line_sent": False}
+        line_sent = send_problem_notification(ticket, payload)
+        return {"ok": True, "action": "created", "ticket_id": ticket.id, "line_sent": line_sent}
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        logger.error("Zabbix webhook processing failed: %s", type(exc).__name__)
+        raise HTTPException(status_code=500, detail="Webhook processing failed")
     finally:
         db.close()
 
@@ -1231,6 +1455,9 @@ PUBLIC_API_PATHS = {
     "/api/auth/logout",
     "/api/slack/webhook",
     "/api/slack/events",
+    "/api/line/webhook",
+    "/api/line/test",
+    "/api/zabbix/webhook",
 }
 
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
