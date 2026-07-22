@@ -53,3 +53,22 @@ data/
 .idea/
 token_*
 *token*
+
+# Secrets
+token_*
+.env
+.env.*
+
+# PostgreSQL data
+postgres/
+
+# Backup files
+*.bak*
+backup_mainpy/
+_cleanup_backup/
+
+# Build/cache
+frontend/node_modules/
+frontend/.next/
+__pycache__/
+*.pyc

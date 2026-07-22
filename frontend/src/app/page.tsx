@@ -1,3 +1,5 @@
+import ZabbixMonthlyTrend from "./ZabbixMonthlyTrend";
+
 export const dynamic = "force-dynamic";
 
 type Ticket = {
@@ -11,6 +13,15 @@ type Ticket = {
   assigned_to?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
+};
+
+type DashboardSummary = {
+  total: number;
+  new: number;
+  in_progress: number;
+  closed: number;
+  open_zabbix: number;
+  manual_pending: number;
 };
 
 type RiskLevel = "critical" | "high" | "medium";
@@ -184,7 +195,7 @@ function badgeStyle(status?: string | null) {
 
 async function getTickets(): Promise<Ticket[]> {
   try {
-    const res = await fetch(`${API_BASE}/api/tickets`, {
+    const res = await fetch(`${API_BASE}/api/tickets?limit=500`, {
       cache: "no-store",
     });
 
@@ -196,13 +207,39 @@ async function getTickets(): Promise<Ticket[]> {
   }
 }
 
-export default async function DashboardPage() {
-  const tickets = await getTickets();
+async function getSummary(): Promise<DashboardSummary> {
+  const emptySummary: DashboardSummary = {
+    total: 0,
+    new: 0,
+    in_progress: 0,
+    closed: 0,
+    open_zabbix: 0,
+    manual_pending: 0,
+  };
 
-  const total = tickets.length;
-  const newCount = tickets.filter((t) => t.status === "New").length;
-  const inProgressCount = tickets.filter((t) => t.status === "In Progress").length;
-  const closedCount = tickets.filter((t) => t.status === "Closed").length;
+  try {
+    const res = await fetch(`${API_BASE}/api/dashboard/summary`, {
+      cache: "no-store",
+    });
+
+    if (!res.ok) return emptySummary;
+    return await res.json();
+  } catch (err) {
+    console.error("Failed to fetch dashboard summary", err);
+    return emptySummary;
+  }
+}
+
+export default async function DashboardPage() {
+  const [tickets, summary] = await Promise.all([
+    getTickets(),
+    getSummary(),
+  ]);
+
+  const total = summary.total;
+  const newCount = summary.new;
+  const inProgressCount = summary.in_progress;
+  const closedCount = summary.closed;
 
   const zabbixTickets = tickets.filter((t) => t.source === "slack_zabbix");
   const zabbixThisMonth = zabbixTickets.filter((t) => isCurrentMonth(t.created_at));
@@ -233,8 +270,8 @@ export default async function DashboardPage() {
   const maxHost = topHosts[0]?.[1] || 0;
 
   const repeatedRisk = topAlerts.filter(([, count]) => count >= 3).length;
-  const openManualRisk = manualOpen.length;
-  const openZabbixRisk = openZabbix.length;
+  const openManualRisk = summary.manual_pending;
+  const openZabbixRisk = summary.open_zabbix;
 
   return (
     <main className="dashboard-page" style={pageStyle}>
@@ -304,7 +341,14 @@ export default async function DashboardPage() {
             <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
               <div style={sectionIconCritical}>⚠</div>
               <div>
-                <h2 style={panelTitle}>Top Zabbix Alerts This Month</h2>
+                <h2 style={panelTitle}>
+                    Top Zabbix Alerts —{" "}
+                    {new Intl.DateTimeFormat("en-US", {
+                      month: "long",
+                      year: "numeric",
+                      timeZone: "Asia/Bangkok",
+                    }).format(new Date())}
+                  </h2>
                 <p style={panelSubTitle}>What alert happens most often and on which host</p>
               </div>
             </div>
@@ -343,7 +387,14 @@ export default async function DashboardPage() {
             <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
               <div style={sectionIconHost}>▣</div>
               <div>
-                <h2 style={panelTitle}>Top Risk Hosts</h2>
+                <h2 style={panelTitle}>
+                    Top Risk Hosts —{" "}
+                    {new Intl.DateTimeFormat("en-US", {
+                      month: "long",
+                      year: "numeric",
+                      timeZone: "Asia/Bangkok",
+                    }).format(new Date())}
+                  </h2>
                 <p style={panelSubTitle}>Hosts with most Zabbix alerts this month</p>
               </div>
             </div>
@@ -375,6 +426,9 @@ export default async function DashboardPage() {
           )}
         </div>
       </section>
+
+        <ZabbixMonthlyTrend />
+
 
       <section style={panel}>
         <div style={panelHeader}>

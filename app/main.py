@@ -4,12 +4,15 @@ import json
 import hmac
 import hashlib
 import time
+import secrets
+import base64
+from datetime import timedelta
 from datetime import datetime
 
-from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import PlainTextResponse
+from fastapi import FastAPI, Request, Response, HTTPException, Depends, Cookie
+from fastapi.responses import PlainTextResponse, JSONResponse
 from pydantic import BaseModel
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey, Float, JSON, text
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey, Float, JSON, text, or_, cast
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
 
@@ -23,18 +26,35 @@ DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}/{DB_NAME}"
 engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,
-    pool_recycle=300,
+    pool_recycle=60,
+    pool_size=5,
+    max_overflow=5,
+    pool_timeout=10,
 )
 
-SessionLocal = sessionmaker(bind=engine)
+SessionLocal = sessionmaker(
+    bind=engine,
+    autocommit=False,
+    autoflush=False,
+    expire_on_commit=False,
+)
 
 
 def get_db():
     db = SessionLocal()
     try:
         yield db
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        raise
     finally:
-        db.close()
+        try:
+            db.close()
+        except Exception:
+            engine.dispose()
 
 
 Base = declarative_base()
@@ -62,6 +82,28 @@ class TicketDB(Base):
     raw_payload = Column(JSON, nullable=True)
 
 
+# AUTH_SYSTEM_V1
+class UserDB(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, unique=True, nullable=False, index=True)
+    password_hash = Column(Text, nullable=False)
+    role = Column(String, nullable=False, default="viewer")
+    is_active = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+
+
+class SessionDB(Base):
+    __tablename__ = "user_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    token_hash = Column(String, unique=True, nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+
+
 class CommentDB(Base):
     __tablename__ = "comments"
 
@@ -86,6 +128,12 @@ class TicketCreate(BaseModel):
     assigned_to: str = ""
     work_hours: float | None = None
     work_count: int | None = 1
+
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
 
 
 class StatusUpdate(BaseModel):
@@ -269,36 +317,61 @@ def home():
 
 
 @app.get("/api/tickets")
-def get_tickets():
-    db = SessionLocal()
-    try:
-        rows = db.query(TicketDB).order_by(TicketDB.id.desc()).all()
+def get_tickets(
+    q: str | None = None,
+    status: str | None = None,
+    status_not: str | None = None,
+    limit: int = 500,
+    db: Session = Depends(get_db),
+):
+    limit = max(1, min(limit, 1000))
 
-        return [
-            {
-                "id": r.id,
-                "title": r.title,
-                "detail": r.detail,
-                "severity": r.severity,
-                "status": r.status,
-                "host": r.host,
-                "source": r.source,
-                "assigned_to": r.assigned_to,
-                "work_hours": r.work_hours,
-                "work_count": r.work_count,
+    query = db.query(TicketDB)
+
+    # Filter status in database before applying limit
+    if status:
+        query = query.filter(TicketDB.status.ilike(status.strip()))
+
+    if status_not:
+        query = query.filter(~TicketDB.status.ilike(status_not.strip()))
+
+    if q:
+        keyword = f"%{q.strip()}%"
+        query = query.filter(
+            or_(
+                cast(TicketDB.id, String).ilike(keyword),
+                TicketDB.title.ilike(keyword),
+                TicketDB.detail.ilike(keyword),
+                TicketDB.severity.ilike(keyword),
+                TicketDB.status.ilike(keyword),
+                TicketDB.host.ilike(keyword),
+                TicketDB.source.ilike(keyword),
+                TicketDB.assigned_to.ilike(keyword),
+            )
+        )
+
+    rows = query.order_by(TicketDB.id.desc()).limit(limit).all()
+
+    result = [
+        {
+            "id": r.id,
+            "title": r.title,
+            "detail": r.detail,
+            "severity": r.severity,
+            "status": r.status,
+            "host": r.host,
+            "source": r.source,
+            "assigned_to": r.assigned_to,
             "work_hours": r.work_hours,
             "work_count": r.work_count,
-                "created_at": str(r.created_at),
-                "updated_at": str(r.updated_at),
-            }
-            for r in rows
-        ]
-    finally:
-        db.close()
+            "created_at": str(r.created_at),
+            "updated_at": str(r.updated_at),
+        }
+        for r in rows
+    ]
 
-
-
-
+    db.rollback()
+    return result
 
 
 @app.put("/api/tickets/{ticket_id}")
@@ -877,3 +950,357 @@ async def slack_events(request: Request):
         }
     finally:
         db.close()
+
+
+@app.get("/api/dashboard/summary")
+def dashboard_summary(db: Session = Depends(get_db)):
+    result = db.execute(
+        text("""
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE status = 'New') AS new,
+                COUNT(*) FILTER (WHERE status = 'In Progress') AS in_progress,
+                COUNT(*) FILTER (WHERE status = 'Closed') AS closed,
+                COUNT(*) FILTER (
+                    WHERE source IN ('zabbix', 'slack_zabbix')
+                      AND status != 'Closed'
+                ) AS open_zabbix,
+                COUNT(*) FILTER (
+                    WHERE source = 'manual'
+                      AND status != 'Closed'
+                ) AS manual_pending
+            FROM tickets
+        """)
+    ).mappings().one()
+
+    data = dict(result)
+    db.rollback()
+    return data
+
+# ZABBIX_MONTHLY_TREND_API_V1
+@app.get("/api/dashboard/zabbix-monthly-trend")
+def zabbix_monthly_trend(
+    year: int = datetime.now().year,
+    db: Session = Depends(get_db),
+):
+    if year < 2000 or year > 2100:
+        raise HTTPException(status_code=400, detail="Invalid year")
+
+    rows = db.execute(
+        text("""
+            SELECT
+                EXTRACT(MONTH FROM created_at)::INTEGER AS month,
+                COUNT(*)::INTEGER AS count
+            FROM tickets
+            WHERE source IN ('zabbix', 'slack_zabbix')
+              AND created_at IS NOT NULL
+              AND EXTRACT(YEAR FROM created_at)::INTEGER = :year
+            GROUP BY EXTRACT(MONTH FROM created_at)
+            ORDER BY month
+        """),
+        {"year": year},
+    ).mappings().all()
+
+    count_by_month = {
+        int(row["month"]): int(row["count"])
+        for row in rows
+    }
+
+    months = [
+        {
+            "month": month,
+            "month_key": f"{year}-{month:02d}",
+            "count": count_by_month.get(month, 0),
+        }
+        for month in range(1, 13)
+    ]
+
+    highest = max(months, key=lambda item: item["count"])
+
+    return {
+        "year": year,
+        "total": sum(item["count"] for item in months),
+        "highest_month": highest["month"],
+        "highest_count": highest["count"],
+        "months": months,
+    }
+
+
+# ============================================================
+# AUTH_SYSTEM_V1
+# ============================================================
+
+AUTH_COOKIE_NAME = "incident_session"
+AUTH_SESSION_DAYS = 7
+
+
+def hash_password(password: str, salt: bytes | None = None) -> str:
+    if not password or len(password) < 8:
+        raise ValueError("Password must contain at least 8 characters")
+
+    salt = salt or secrets.token_bytes(16)
+
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        310000,
+    )
+
+    return (
+        "pbkdf2_sha256$310000$"
+        + base64.b64encode(salt).decode("ascii")
+        + "$"
+        + base64.b64encode(digest).decode("ascii")
+    )
+
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    try:
+        algorithm, iterations, salt_text, digest_text = stored_hash.split("$", 3)
+
+        if algorithm != "pbkdf2_sha256":
+            return False
+
+        salt = base64.b64decode(salt_text)
+        expected = base64.b64decode(digest_text)
+
+        actual = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt,
+            int(iterations),
+        )
+
+        return hmac.compare_digest(actual, expected)
+    except Exception:
+        return False
+
+
+def hash_session_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def get_current_user_optional(
+    incident_session: str | None = Cookie(default=None),
+    db: Session = Depends(get_db),
+):
+    if not incident_session:
+        return None
+
+    token_hash = hash_session_token(incident_session)
+
+    row = (
+        db.query(SessionDB, UserDB)
+        .join(UserDB, UserDB.id == SessionDB.user_id)
+        .filter(
+            SessionDB.token_hash == token_hash,
+            SessionDB.expires_at > datetime.now(),
+            UserDB.is_active == 1,
+        )
+        .first()
+    )
+
+    if not row:
+        return None
+
+    _, user = row
+    return user
+
+
+def require_user(
+    user: UserDB | None = Depends(get_current_user_optional),
+):
+    if not user:
+        raise HTTPException(status_code=401, detail="Login required")
+
+    return user
+
+
+def require_admin(
+    user: UserDB = Depends(require_user),
+):
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin permission required")
+
+    return user
+
+
+@app.post("/api/auth/login")
+def auth_login(
+    payload: LoginRequest,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    username = payload.username.strip().lower()
+
+    user = (
+        db.query(UserDB)
+        .filter(UserDB.username == username)
+        .first()
+    )
+
+    if (
+        not user
+        or user.is_active != 1
+        or not verify_password(payload.password, user.password_hash)
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid username or password",
+        )
+
+    token = secrets.token_urlsafe(48)
+    expires_at = datetime.now() + timedelta(days=AUTH_SESSION_DAYS)
+
+    db.query(SessionDB).filter(
+        SessionDB.expires_at <= datetime.now()
+    ).delete(synchronize_session=False)
+
+    session = SessionDB(
+        token_hash=hash_session_token(token),
+        user_id=user.id,
+        expires_at=expires_at,
+        created_at=datetime.now(),
+    )
+
+    db.add(session)
+    db.commit()
+
+    response.set_cookie(
+        key=AUTH_COOKIE_NAME,
+        value=token,
+        max_age=AUTH_SESSION_DAYS * 86400,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/",
+    )
+
+    return {
+        "ok": True,
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "role": user.role,
+        },
+    }
+
+
+@app.post("/api/auth/logout")
+def auth_logout(
+    response: Response,
+    incident_session: str | None = Cookie(default=None),
+    db: Session = Depends(get_db),
+):
+    if incident_session:
+        db.query(SessionDB).filter(
+            SessionDB.token_hash == hash_session_token(incident_session)
+        ).delete(synchronize_session=False)
+
+        db.commit()
+
+    response.delete_cookie(
+        key=AUTH_COOKIE_NAME,
+        path="/",
+        secure=True,
+        httponly=True,
+        samesite="lax",
+    )
+
+    return {"ok": True}
+
+
+@app.get("/api/auth/me")
+def auth_me(
+    user: UserDB = Depends(require_user),
+):
+    return {
+        "id": user.id,
+        "username": user.username,
+        "role": user.role,
+    }
+
+
+# ============================================================
+# API_SECURITY_MIDDLEWARE_V1
+# ============================================================
+
+PUBLIC_API_PATHS = {
+    "/api/auth/login",
+    "/api/auth/logout",
+    "/api/slack/webhook",
+    "/api/slack/events",
+}
+
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+def resolve_user_from_token(db: Session, token: str | None):
+    if not token:
+        return None
+
+    token_hash = hash_session_token(token)
+
+    row = (
+        db.query(SessionDB, UserDB)
+        .join(UserDB, UserDB.id == SessionDB.user_id)
+        .filter(
+            SessionDB.token_hash == token_hash,
+            SessionDB.expires_at > datetime.now(),
+            UserDB.is_active == 1,
+        )
+        .first()
+    )
+
+    if not row:
+        return None
+
+    return row[1]
+
+
+@app.middleware("http")
+async def api_security_middleware(request: Request, call_next):
+    path = request.url.path
+    method = request.method.upper()
+
+    # ไม่เกี่ยวกับ API
+    if not path.startswith("/api/"):
+        return await call_next(request)
+
+    # Login/Logout และ Slack Webhook
+    if path in PUBLIC_API_PATHS:
+        return await call_next(request)
+
+    # Next.js Server เรียก GET ภายใน Docker Network
+    # ไม่มี X-Forwarded-For เพราะไม่ได้ผ่าน Nginx
+    forwarded_for = request.headers.get("x-forwarded-for")
+
+    if method in SAFE_METHODS and not forwarded_for:
+        return await call_next(request)
+
+    token = request.cookies.get(AUTH_COOKIE_NAME)
+    db = SessionLocal()
+
+    try:
+        user = resolve_user_from_token(db, token)
+
+        if not user:
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Login required"},
+            )
+
+        # Viewer อ่านได้อย่างเดียว
+        if method not in SAFE_METHODS and user.role != "admin":
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "Admin permission required"},
+            )
+
+        request.state.current_user = user
+        return await call_next(request)
+
+    finally:
+        db.close()
+

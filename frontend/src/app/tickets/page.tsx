@@ -124,9 +124,11 @@ function buildTitle(params: {
   title?: string;
   risk?: string;
   status_not?: string;
+  q?: string;
 }) {
   const parts: string[] = [];
 
+  if (params.q) parts.push(`Search: ${params.q}`);
   if (params.status) parts.push(`Status: ${params.status}`);
   if (params.status_not) parts.push(`Status not: ${params.status_not}`);
   if (params.assigned_to) parts.push(`Assigned: ${params.assigned_to}`);
@@ -139,9 +141,32 @@ function buildTitle(params: {
   return `Tickets - ${parts.join(" | ")}`;
 }
 
-async function getTickets(): Promise<Ticket[]> {
+async function getTickets(
+  q?: string,
+  status?: string,
+  statusNot?: string
+): Promise<Ticket[]> {
   try {
-    const res = await fetch(`${API_BASE}/api/tickets`, {
+    const params = new URLSearchParams();
+
+    if (q) {
+      params.set("q", q);
+    }
+
+
+    if (status) {
+      params.set("status", status);
+    }
+
+    if (statusNot) {
+      params.set("status_not", statusNot);
+    }
+
+    params.set("limit", "1000");
+
+    const url = `${API_BASE}/api/tickets?${params.toString()}`;
+
+    const res = await fetch(url, {
       cache: "no-store",
     });
 
@@ -167,18 +192,12 @@ export default async function TicketsPage({
   const host = typeof sp.host === "string" ? sp.host : undefined;
   const title = typeof sp.title === "string" ? sp.title : undefined;
   const risk = typeof sp.risk === "string" ? sp.risk : undefined;
+  const q = typeof sp.q === "string" ? sp.q : undefined;
 
-  const tickets = await getTickets();
+  const tickets = await getTickets(q, status, statusNot);
 
   let filteredTickets = [...tickets];
 
-  if (status) {
-    filteredTickets = filteredTickets.filter((t) => t.status === status);
-  }
-
-  if (statusNot) {
-    filteredTickets = filteredTickets.filter((t) => t.status !== statusNot);
-  }
 
   if (assignedTo) {
     filteredTickets = filteredTickets.filter((t) => t.assigned_to === assignedTo);
@@ -249,6 +268,7 @@ export default async function TicketsPage({
               title,
               risk,
               status_not: statusNot,
+              q,
             })}
           </h1>
 
@@ -266,6 +286,55 @@ export default async function TicketsPage({
           <a href="/tickets/new" style={primaryButtonStyle}>+ Create Ticket</a>
         </div>
       </section>
+
+      <form
+        action="/tickets"
+        style={{
+          display: "flex",
+          gap: "10px",
+          flexWrap: "wrap",
+          alignItems: "center",
+          marginBottom: "18px",
+          padding: "14px",
+          border: "1px solid #e2e8f0",
+          borderRadius: "12px",
+          background: "#f8fafc",
+        }}
+      >
+        {status && <input type="hidden" name="status" value={status} />}
+        {statusNot && <input type="hidden" name="status_not" value={statusNot} />}
+        {assignedTo && <input type="hidden" name="assigned_to" value={assignedTo} />}
+        {source && <input type="hidden" name="source" value={source} />}
+        {host && <input type="hidden" name="host" value={host} />}
+        {title && <input type="hidden" name="title" value={title} />}
+        {risk && <input type="hidden" name="risk" value={risk} />}
+
+        <input
+          name="q"
+          defaultValue={q || ""}
+          placeholder="Search ID, title, host, detail, status, assigned..."
+          style={{
+            flex: "1 1 320px",
+            minWidth: "240px",
+            padding: "12px 14px",
+            borderRadius: "10px",
+            border: "1px solid #cbd5e1",
+            color: "#0f172a",
+            background: "#ffffff",
+            fontWeight: 600,
+          }}
+        />
+
+        <button type="submit" style={primaryButtonStyle}>
+          Search
+        </button>
+
+        {q && (
+          <a href="/tickets" style={buttonStyle}>
+            Clear
+          </a>
+        )}
+      </form>
 
       <div className="rj-table-wrap" style={{ overflowX: "auto" }}>
         <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
