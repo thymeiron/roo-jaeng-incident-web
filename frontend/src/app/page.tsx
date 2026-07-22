@@ -1,4 +1,5 @@
 import ZabbixMonthlyTrend from "./ZabbixMonthlyTrend";
+import { authenticatedApiFetch } from "@/lib/server-api";
 
 export const dynamic = "force-dynamic";
 
@@ -25,11 +26,6 @@ type DashboardSummary = {
 };
 
 type RiskLevel = "critical" | "high" | "medium";
-
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE_URL ||
-  process.env.API_BASE_URL ||
-  "http://incident-api:8000";
 
 function cleanTitle(title?: string | null) {
   if (!title) return "Unknown Alert";
@@ -195,7 +191,7 @@ function badgeStyle(status?: string | null) {
 
 async function getTickets(): Promise<Ticket[]> {
   try {
-    const res = await fetch(`${API_BASE}/api/tickets?limit=500`, {
+    const res = await authenticatedApiFetch("/api/tickets?limit=500", {
       cache: "no-store",
     });
 
@@ -218,7 +214,7 @@ async function getSummary(): Promise<DashboardSummary> {
   };
 
   try {
-    const res = await fetch(`${API_BASE}/api/dashboard/summary`, {
+    const res = await authenticatedApiFetch("/api/dashboard/summary", {
       cache: "no-store",
     });
 

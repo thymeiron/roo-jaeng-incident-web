@@ -1,11 +1,7 @@
 import TicketActions from "./TicketActions";
+import { authenticatedApiFetch } from "@/lib/server-api";
 
 export const dynamic = "force-dynamic";
-
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE_URL ||
-  process.env.API_BASE_URL ||
-  "http://incident-api:8000";
 
 type Ticket = {
   id: number;
@@ -98,7 +94,7 @@ function severityColor(severity?: string | null) {
 
 async function getTicket(id: string): Promise<Ticket | null> {
   try {
-    const res = await fetch(`${API_BASE}/api/tickets/${id}`, {
+    const res = await authenticatedApiFetch(`/api/tickets/${id}`, {
       cache: "no-store",
     });
 

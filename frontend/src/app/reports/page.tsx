@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { ASSIGNEES, normalizeAssignedTo } from "@/lib/assignees";
+import { authenticatedApiFetch } from "@/lib/server-api";
 
 export const dynamic = "force-dynamic";
 
@@ -39,13 +40,8 @@ type IncidentRow = {
   latest_created_at?: string | null;
 };
 
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE_URL ||
-  process.env.API_BASE_URL ||
-  "http://incident-api:8000";
-
 async function getTickets(): Promise<Ticket[]> {
-  const res = await fetch(`${API_BASE}/api/tickets`, {
+  const res = await authenticatedApiFetch("/api/tickets", {
     cache: "no-store",
   });
 

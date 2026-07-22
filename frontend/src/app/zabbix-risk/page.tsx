@@ -1,3 +1,5 @@
+import { authenticatedApiFetch } from "@/lib/server-api";
+
 export const dynamic = "force-dynamic";
 
 type Ticket = {
@@ -12,11 +14,6 @@ type Ticket = {
   created_at?: string | null;
   updated_at?: string | null;
 };
-
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE_URL ||
-  process.env.API_BASE_URL ||
-  "http://incident-api:8000";
 
 function cleanTitle(value?: string | null) {
   if (!value) return "Unknown Alert";
@@ -62,7 +59,7 @@ function formatDate(value?: string | null) {
 
 async function getTickets(): Promise<Ticket[]> {
   try {
-    const res = await fetch(`${API_BASE}/api/tickets`, {
+    const res = await authenticatedApiFetch("/api/tickets", {
       cache: "no-store",
     });
 

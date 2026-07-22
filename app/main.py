@@ -1272,13 +1272,6 @@ async def api_security_middleware(request: Request, call_next):
     if path in PUBLIC_API_PATHS:
         return await call_next(request)
 
-    # Next.js Server เรียก GET ภายใน Docker Network
-    # ไม่มี X-Forwarded-For เพราะไม่ได้ผ่าน Nginx
-    forwarded_for = request.headers.get("x-forwarded-for")
-
-    if method in SAFE_METHODS and not forwarded_for:
-        return await call_next(request)
-
     token = request.cookies.get(AUTH_COOKIE_NAME)
     db = SessionLocal()
 
@@ -1303,4 +1296,3 @@ async def api_security_middleware(request: Request, call_next):
 
     finally:
         db.close()
-

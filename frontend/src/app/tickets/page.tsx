@@ -1,4 +1,5 @@
 import InlineDetailEditor from "./InlineDetailEditor";
+import { authenticatedApiFetch } from "@/lib/server-api";
 
 export const dynamic = "force-dynamic";
 
@@ -16,11 +17,6 @@ type Ticket = {
   created_at?: string | null;
   updated_at?: string | null;
 };
-
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE_URL ||
-  process.env.API_BASE_URL ||
-  "http://incident-api:8000";
 
 function cleanTitle(value?: string | null) {
   if (!value) return "";
@@ -164,9 +160,9 @@ async function getTickets(
 
     params.set("limit", "1000");
 
-    const url = `${API_BASE}/api/tickets?${params.toString()}`;
+    const url = `/api/tickets?${params.toString()}`;
 
-    const res = await fetch(url, {
+    const res = await authenticatedApiFetch(url, {
       cache: "no-store",
     });
 

@@ -1,28 +1,46 @@
 import { NextRequest, NextResponse } from "next/server";
 
 const COOKIE_NAME = "incident_session";
+const API_BASE =
+  process.env.API_BASE_URL ||
+  process.env.NEXT_PUBLIC_API_BASE_URL ||
+  "http://incident-api:8000";
 
-export function proxy(request: NextRequest) {
+function loginRedirect(request: NextRequest) {
   const { pathname, search } = request.nextUrl;
+  const loginUrl = new URL("/login", request.url);
 
-  const isLoginPage = pathname === "/login";
-  const sessionCookie = request.cookies.get(COOKIE_NAME)?.value;
+  if (pathname !== "/") {
+    loginUrl.searchParams.set("next", `${pathname}${search}`);
+  }
 
-  if (isLoginPage) {
+  return NextResponse.redirect(loginUrl);
+}
+
+export async function proxy(request: NextRequest) {
+  if (request.nextUrl.pathname === "/login") {
     return NextResponse.next();
   }
 
-  if (!sessionCookie) {
-    const loginUrl = new URL("/login", request.url);
+  const sessionToken = request.cookies.get(COOKIE_NAME)?.value;
 
-    if (pathname !== "/") {
-      loginUrl.searchParams.set(
-        "next",
-        `${pathname}${search}`,
-      );
+  if (!sessionToken) {
+    return loginRedirect(request);
+  }
+
+  try {
+    const response = await fetch(`${API_BASE}/api/auth/me`, {
+      headers: {
+        cookie: `${COOKIE_NAME}=${sessionToken}`,
+      },
+      cache: "no-store",
+    });
+
+    if (!response.ok) {
+      return loginRedirect(request);
     }
-
-    return NextResponse.redirect(loginUrl);
+  } catch {
+    return loginRedirect(request);
   }
 
   return NextResponse.next();
@@ -30,6 +48,6 @@ export function proxy(request: NextRequest) {
 
 export const config = {
   matcher: [
-    "/((?!_next/static|_next/image|favicon.ico|icon.svg|manifest.json|sw.js).*)",
+    "/((?!api|_next/static|_next/image|favicon.ico|icon.svg|manifest.json|sw.js).*)",
   ],
 };
