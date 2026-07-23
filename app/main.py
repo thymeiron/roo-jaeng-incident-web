@@ -15,7 +15,7 @@ from datetime import datetime
 from fastapi import FastAPI, Request, Response, HTTPException, Depends, Cookie
 from fastapi.responses import PlainTextResponse, JSONResponse
 from pydantic import BaseModel
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey, Float, JSON, text, or_, cast
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey, Float, JSON, text, or_, cast, func
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from sqlalchemy.exc import IntegrityError
 
@@ -304,11 +304,35 @@ def send_problem_notification(ticket: TicketDB, event: dict) -> bool:
     )
 
 
+def format_ticket_duration(ticket: TicketDB) -> str:
+    if not ticket.created_at or not ticket.updated_at:
+        return "Unknown"
+
+    duration_seconds = int((ticket.updated_at - ticket.created_at).total_seconds())
+    if duration_seconds < 0:
+        return "Unknown"
+
+    days, remainder = divmod(duration_seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if seconds or not parts:
+        parts.append(f"{seconds}s")
+    return " ".join(parts)
+
+
 def send_recovery_notification(ticket: TicketDB, event: dict) -> bool:
     return send_line_push_message(
         "🟢 Zabbix Recovery\n"
         f"Ticket: #{ticket.id}\nHost: {event.get('host', '')}\n"
         f"Problem: {event.get('event_name', '')}\nStatus: Closed\n"
+        f"Duration: {format_ticket_duration(ticket)}\n"
         f"{ticket_url(ticket.id)}"
     )
 
@@ -448,15 +472,34 @@ def home():
 
 @app.get("/api/tickets")
 def get_tickets(
+    request: Request,
     q: str | None = None,
     status: str | None = None,
     status_not: str | None = None,
+    source: str | None = None,
+    host: str | None = None,
+    title: str | None = None,
+    assigned_to: str | None = None,
+    risk: str | None = None,
+    page: int = 1,
+    page_size: int = 100,
+    paginated: bool = False,
     limit: int = 500,
     db: Session = Depends(get_db),
 ):
+    page = max(1, page)
+    page_size = max(1, min(page_size, 200))
     limit = max(1, min(limit, 1000))
 
     query = db.query(TicketDB)
+    normalized_host = func.lower(
+        func.btrim(func.regexp_replace(func.coalesce(TicketDB.host, ""), r"\[.*?\]", "", "g"))
+    )
+    normalized_title = func.lower(func.btrim(func.coalesce(TicketDB.title, "")))
+    normalized_title = func.regexp_replace(normalized_title, r"^problem:\s*", "", "i")
+    normalized_title = func.regexp_replace(normalized_title, r"^resolved.*?:\s*", "", "i")
+    normalized_title = func.regexp_replace(normalized_title, r"\s+on\s+[a-z0-9_-]+$", "", "i")
+    normalized_title = func.regexp_replace(normalized_title, r"\s+", " ", "g")
 
     # Filter status in database before applying limit
     if status:
@@ -480,7 +523,56 @@ def get_tickets(
             )
         )
 
-    rows = query.order_by(TicketDB.id.desc()).limit(limit).all()
+    if source:
+        source_value = source.strip()
+        if source_value.lower() == "zabbix":
+            query = query.filter(TicketDB.source.in_(["zabbix", "slack_zabbix"]))
+        else:
+            query = query.filter(TicketDB.source.ilike(source_value))
+
+    if host:
+        query = query.filter(normalized_host == host.strip().lower())
+
+    if title:
+        query = query.filter(normalized_title == title.strip().lower())
+
+    if assigned_to is not None:
+        assigned_value = assigned_to.strip()
+        if assigned_value:
+            query = query.filter(TicketDB.assigned_to.ilike(assigned_value))
+        else:
+            query = query.filter(
+                or_(TicketDB.assigned_to.is_(None), func.btrim(TicketDB.assigned_to) == "")
+            )
+
+    if risk == "repeated":
+        repeated_groups = (
+            query.with_entities(
+                normalized_host.label("normalized_host"),
+                normalized_title.label("normalized_title"),
+            )
+            .filter(TicketDB.source.in_(["zabbix", "slack_zabbix"]))
+            .group_by(normalized_host, normalized_title)
+            .having(func.count(TicketDB.id) >= 3)
+            .subquery()
+        )
+        query = query.filter(
+            TicketDB.source.in_(["zabbix", "slack_zabbix"]),
+            db.query(repeated_groups)
+            .filter(
+                repeated_groups.c.normalized_host == normalized_host,
+                repeated_groups.c.normalized_title == normalized_title,
+            )
+            .exists(),
+        )
+
+    use_pagination = paginated or "page" in request.query_params or "page_size" in request.query_params
+    total = query.order_by(None).count() if use_pagination else None
+    ordered_query = query.order_by(TicketDB.created_at.desc().nullslast(), TicketDB.id.desc())
+    if use_pagination:
+        rows = ordered_query.offset((page - 1) * page_size).limit(page_size).all()
+    else:
+        rows = ordered_query.limit(limit).all()
 
     result = [
         {
@@ -501,7 +593,16 @@ def get_tickets(
     ]
 
     db.rollback()
-    return result
+    if not use_pagination:
+        return result
+
+    return {
+        "items": result,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": (total + page_size - 1) // page_size,
+    }
 
 
 @app.put("/api/tickets/{ticket_id}")
@@ -1248,6 +1349,129 @@ def zabbix_monthly_trend(
         "highest_count": highest["count"],
         "months": months,
     }
+
+
+@app.get("/api/dashboard/analytics")
+def dashboard_analytics(db: Session = Depends(get_db)):
+    rows = db.execute(
+        text("""
+            WITH months AS (
+                SELECT generate_series(
+                    date_trunc('month', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok') - interval '5 months',
+                    date_trunc('month', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok'),
+                    interval '1 month'
+                ) AS month_start
+            )
+            SELECT
+                to_char(months.month_start, 'YYYY-MM') AS month_key,
+                COUNT(t.id)::INTEGER AS total,
+                COUNT(t.id) FILTER (
+                    WHERE t.source IN ('zabbix', 'slack_zabbix')
+                )::INTEGER AS zabbix,
+                COUNT(t.id) FILTER (
+                    WHERE t.source NOT IN ('zabbix', 'slack_zabbix') OR t.source IS NULL
+                )::INTEGER AS manual
+            FROM months
+            LEFT JOIN tickets t
+              ON t.created_at >= months.month_start
+             AND t.created_at < months.month_start + interval '1 month'
+            GROUP BY months.month_start
+            ORDER BY months.month_start
+        """)
+    ).mappings().all()
+
+    current_month_start = "date_trunc('month', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Bangkok')"
+    top_hosts = db.execute(
+        text(f"""
+            SELECT COALESCE(NULLIF(BTRIM(host), ''), 'Unknown') AS host,
+                   COUNT(*)::INTEGER AS alerts
+            FROM tickets
+            WHERE source IN ('zabbix', 'slack_zabbix')
+              AND created_at >= {current_month_start}
+              AND created_at < {current_month_start} + interval '1 month'
+            GROUP BY COALESCE(NULLIF(BTRIM(host), ''), 'Unknown')
+            ORDER BY alerts DESC, host ASC
+            LIMIT 10
+        """)
+    ).mappings().all()
+
+    severity_rows = db.execute(
+        text(f"""
+            SELECT severity_group, COUNT(*)::INTEGER AS count
+            FROM (
+                SELECT CASE
+                    WHEN LOWER(BTRIM(COALESCE(severity, ''))) IN ('critical', 'disaster') THEN 'Critical'
+                    WHEN LOWER(BTRIM(COALESCE(severity, ''))) IN ('high', 'major') THEN 'High'
+                    WHEN LOWER(BTRIM(COALESCE(severity, ''))) IN ('average', 'medium') THEN 'Average'
+                    WHEN LOWER(BTRIM(COALESCE(severity, ''))) IN ('warning', 'low', 'very low') THEN 'Warning'
+                    WHEN LOWER(BTRIM(COALESCE(severity, ''))) IN ('information', 'info') THEN 'Information'
+                    ELSE 'Unknown'
+                END AS severity_group
+                FROM tickets
+                WHERE created_at >= {current_month_start}
+                  AND created_at < {current_month_start} + interval '1 month'
+            ) current_tickets
+            GROUP BY severity_group
+        """)
+    ).mappings().all()
+
+    source_row = db.execute(
+        text(f"""
+            SELECT
+                COUNT(*)::INTEGER AS total,
+                COUNT(*) FILTER (
+                    WHERE source IN ('zabbix', 'slack_zabbix')
+                )::INTEGER AS zabbix,
+                COUNT(*) FILTER (
+                    WHERE source NOT IN ('zabbix', 'slack_zabbix') OR source IS NULL
+                )::INTEGER AS manual
+            FROM tickets
+            WHERE created_at >= {current_month_start}
+              AND created_at < {current_month_start} + interval '1 month'
+        """)
+    ).mappings().one()
+
+    recent_rows = db.execute(
+        text("""
+            SELECT id, host, title, status, created_at, updated_at,
+                   GREATEST(
+                       COALESCE(updated_at, created_at),
+                       COALESCE(created_at, updated_at)
+                   ) AS latest_at
+            FROM tickets
+            ORDER BY latest_at DESC NULLS LAST, id DESC
+            LIMIT 10
+        """)
+    ).mappings().all()
+
+    severity_counts = {row["severity_group"]: int(row["count"]) for row in severity_rows}
+    severity_order = ["Critical", "High", "Average", "Warning", "Information", "Unknown"]
+    total = int(source_row["total"])
+
+    data = {
+        "monthly_trend": [dict(row) for row in rows],
+        "top_risk_hosts": [dict(row) for row in top_hosts],
+        "severity_summary": [
+            {"severity": severity, "count": severity_counts.get(severity, 0)}
+            for severity in severity_order
+        ],
+        "source_summary": {
+            "total": total,
+            "zabbix": int(source_row["zabbix"]),
+            "manual": int(source_row["manual"]),
+        },
+        "recent_activity": [
+            {
+                **dict(row),
+                "created_at": str(row["created_at"]) if row["created_at"] else None,
+                "updated_at": str(row["updated_at"]) if row["updated_at"] else None,
+                "latest_at": str(row["latest_at"]) if row["latest_at"] else None,
+            }
+            for row in recent_rows
+        ],
+    }
+    db.rollback()
+    return data
 
 
 # ============================================================

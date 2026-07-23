@@ -1,4 +1,5 @@
 import InlineDetailEditor from "./InlineDetailEditor";
+import PageSizeSelect from "./PageSizeSelect";
 import { authenticatedApiFetch } from "@/lib/server-api";
 
 export const dynamic = "force-dynamic";
@@ -18,25 +19,13 @@ type Ticket = {
   updated_at?: string | null;
 };
 
-function cleanTitle(value?: string | null) {
-  if (!value) return "";
-
-  return value
-    .replace(/^Problem:\s*/i, "")
-    .replace(/^Resolved.*?:\s*/i, "")
-    .replace(/\s+on\s+[A-Z0-9_-]+$/i, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
-}
-
-function cleanHost(value?: string | null) {
-  if (!value) return "";
-  return value
-    .replace(/\[.*?\]/g, "")
-    .trim()
-    .toLowerCase();
-}
+type TicketsResponse = {
+  items: Ticket[];
+  page: number;
+  page_size: number;
+  total: number;
+  total_pages: number;
+};
 
 function formatDate(value?: string | null) {
   if (!value) return "-";
@@ -137,41 +126,39 @@ function buildTitle(params: {
   return `Tickets - ${parts.join(" | ")}`;
 }
 
-async function getTickets(
-  q?: string,
-  status?: string,
-  statusNot?: string
-): Promise<Ticket[]> {
+async function getTickets(params: URLSearchParams): Promise<TicketsResponse> {
   try {
-    const params = new URLSearchParams();
-
-    if (q) {
-      params.set("q", q);
-    }
-
-
-    if (status) {
-      params.set("status", status);
-    }
-
-    if (statusNot) {
-      params.set("status_not", statusNot);
-    }
-
-    params.set("limit", "1000");
-
+    params.set("paginated", "true");
     const url = `/api/tickets?${params.toString()}`;
 
     const res = await authenticatedApiFetch(url, {
       cache: "no-store",
     });
 
-    if (!res.ok) return [];
+    if (!res.ok) throw new Error(`Ticket API returned ${res.status}`);
     return await res.json();
   } catch (err) {
     console.error("Failed to fetch tickets", err);
-    return [];
+    return { items: [], page: 1, page_size: 100, total: 0, total_pages: 0 };
   }
+}
+
+function positiveInteger(value: string | undefined, fallback: number) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function paginationPages(current: number, total: number): Array<number | "ellipsis"> {
+  if (total <= 5) return Array.from({ length: total }, (_, index) => index + 1);
+
+  const pages = new Set([1, total, current - 1, current, current + 1]);
+  const valid = [...pages].filter((page) => page >= 1 && page <= total).sort((a, b) => a - b);
+  const result: Array<number | "ellipsis"> = [];
+  valid.forEach((page, index) => {
+    if (index > 0 && page - valid[index - 1] > 1) result.push("ellipsis");
+    result.push(page);
+  });
+  return result;
 }
 
 export default async function TicketsPage({
@@ -189,53 +176,46 @@ export default async function TicketsPage({
   const title = typeof sp.title === "string" ? sp.title : undefined;
   const risk = typeof sp.risk === "string" ? sp.risk : undefined;
   const q = typeof sp.q === "string" ? sp.q : undefined;
+  const requestedPage = positiveInteger(typeof sp.page === "string" ? sp.page : undefined, 1);
+  const requestedPageSize = positiveInteger(typeof sp.page_size === "string" ? sp.page_size : undefined, 100);
+  const pageSize = [50, 100, 200].includes(requestedPageSize) ? requestedPageSize : 100;
 
-  const tickets = await getTickets(q, status, statusNot);
+  const apiParams = new URLSearchParams();
+  const filters = { q, status, status_not: statusNot, assigned_to: assignedTo, source, host, title, risk };
+  Object.entries(filters).forEach(([key, value]) => {
+    if (value !== undefined) apiParams.set(key, value);
+  });
+  apiParams.set("page", String(requestedPage));
+  apiParams.set("page_size", String(pageSize));
 
-  let filteredTickets = [...tickets];
+  const response = await getTickets(apiParams);
+  const tickets = response.items;
+  const currentPage = response.page;
+  const totalPages = response.total_pages;
 
-
-  if (assignedTo) {
-    filteredTickets = filteredTickets.filter((t) => t.assigned_to === assignedTo);
-  }
-
-  if (source) {
-    filteredTickets = filteredTickets.filter((t) => t.source === source);
-  }
-
-  if (host) {
-    filteredTickets = filteredTickets.filter(
-      (t) => cleanHost(t.host) === host.toLowerCase()
-    );
-  }
-
-  if (title) {
-    filteredTickets = filteredTickets.filter(
-      (t) => cleanTitle(t.title) === title.toLowerCase()
-    );
-  }
-
-  if (risk === "repeated") {
-    const zabbixTickets = filteredTickets.filter((t) => t.source === "slack_zabbix");
-    const counts: Record<string, number> = {};
-
-    for (const t of zabbixTickets) {
-      const key = `${cleanHost(t.host)}|${cleanTitle(t.title)}`;
-      counts[key] = (counts[key] || 0) + 1;
+  function ticketsUrl(overrides: Record<string, string | number | undefined>, clearFilters = false) {
+    const params = new URLSearchParams();
+    if (!clearFilters) {
+      Object.entries(filters).forEach(([key, value]) => {
+        if (value !== undefined) params.set(key, value);
+      });
     }
-
-    filteredTickets = zabbixTickets.filter((t) => {
-      const key = `${cleanHost(t.host)}|${cleanTitle(t.title)}`;
-      return counts[key] >= 3;
+    params.set("page", String(overrides.page ?? 1));
+    params.set("page_size", String(overrides.page_size ?? pageSize));
+    Object.entries(overrides).forEach(([key, value]) => {
+      if (key === "page" || key === "page_size") return;
+      if (value === undefined) params.delete(key);
+      else params.set(key, String(value));
     });
+    return `/tickets?${params.toString()}`;
   }
 
-  filteredTickets.sort((a, b) => (b.id || 0) - (a.id || 0));
-
-  const allUrl = "/tickets";
-  const newUrl = "/tickets?status=New";
-  const inProgressUrl = "/tickets?status=In%20Progress";
-  const closedUrl = "/tickets?status=Closed";
+  const allUrl = ticketsUrl({}, true);
+  const newUrl = ticketsUrl({ status: "New" }, true);
+  const inProgressUrl = ticketsUrl({ status: "In Progress" }, true);
+  const closedUrl = ticketsUrl({ status: "Closed" }, true);
+  const showingFrom = response.total === 0 ? 0 : (currentPage - 1) * response.page_size + 1;
+  const showingTo = Math.min(currentPage * response.page_size, response.total);
 
   return (
     <main className="rj-page" style={{ padding: "28px", background: "#ffffff", minHeight: "100vh" }}>
@@ -269,7 +249,7 @@ export default async function TicketsPage({
           </h1>
 
           <p style={{ marginTop: "8px", color: "#334155" }}>
-            Showing {filteredTickets.length} of {tickets.length} tickets
+            Showing {showingFrom.toLocaleString("en-US")}–{showingTo.toLocaleString("en-US")} of {response.total.toLocaleString("en-US")} tickets
           </p>
         </div>
 
@@ -299,11 +279,13 @@ export default async function TicketsPage({
       >
         {status && <input type="hidden" name="status" value={status} />}
         {statusNot && <input type="hidden" name="status_not" value={statusNot} />}
-        {assignedTo && <input type="hidden" name="assigned_to" value={assignedTo} />}
+        {assignedTo !== undefined && <input type="hidden" name="assigned_to" value={assignedTo} />}
         {source && <input type="hidden" name="source" value={source} />}
         {host && <input type="hidden" name="host" value={host} />}
         {title && <input type="hidden" name="title" value={title} />}
         {risk && <input type="hidden" name="risk" value={risk} />}
+        <input type="hidden" name="page" value="1" />
+        <input type="hidden" name="page_size" value={pageSize} />
 
         <input
           name="q"
@@ -326,11 +308,26 @@ export default async function TicketsPage({
         </button>
 
         {q && (
-          <a href="/tickets" style={buttonStyle}>
+          <a href={ticketsUrl({ q: undefined })} style={buttonStyle}>
             Clear
           </a>
         )}
       </form>
+
+      <div style={paginationBarStyle}>
+        <PageSizeSelect value={pageSize} />
+        <nav aria-label="Ticket pagination" style={paginationNavStyle}>
+          <a aria-disabled={currentPage <= 1} href={currentPage > 1 ? ticketsUrl({ page: currentPage - 1 }) : undefined} style={currentPage <= 1 ? disabledPageStyle : pageLinkStyle}>Previous</a>
+          {paginationPages(currentPage, totalPages).map((item, index) =>
+            item === "ellipsis" ? (
+              <span key={`ellipsis-${index}`} style={ellipsisStyle}>…</span>
+            ) : (
+              <a key={item} aria-current={item === currentPage ? "page" : undefined} href={ticketsUrl({ page: item })} style={item === currentPage ? activePageStyle : pageLinkStyle}>{item}</a>
+            )
+          )}
+          <a aria-disabled={currentPage >= totalPages} href={currentPage < totalPages ? ticketsUrl({ page: currentPage + 1 }) : undefined} style={currentPage >= totalPages ? disabledPageStyle : pageLinkStyle}>Next</a>
+        </nav>
+      </div>
 
       <div className="rj-table-wrap" style={{ overflowX: "auto" }}>
         <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
@@ -350,7 +347,7 @@ export default async function TicketsPage({
           </thead>
 
           <tbody>
-            {filteredTickets.map((ticket) => (
+            {tickets.map((ticket) => (
               <tr key={ticket.id} style={{ borderBottom: "1px solid #edf2f7", background: "#ffffff" }}>
                 <td
                     style={{
@@ -386,11 +383,10 @@ export default async function TicketsPage({
                 </td>
                 <td style={tdStyle}>
                   <a
-                    href={
-                      ticket.assigned_to
-                        ? `/tickets?assigned_to=${encodeURIComponent(ticket.assigned_to)}`
-                        : "/tickets?assigned_to="
-                    }
+                    href={ticketsUrl(
+                      { assigned_to: ticket.assigned_to || "" },
+                      true
+                    )}
                     style={{
                         textDecoration: "none",
                         fontWeight: 700,
@@ -424,6 +420,51 @@ const tdStyle = {
   padding: "12px 8px",
   color: "#0f172a",
   verticalAlign: "top" as const,
+};
+
+const paginationBarStyle = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  flexWrap: "wrap" as const,
+  gap: "12px",
+  marginBottom: "16px",
+};
+
+const paginationNavStyle = {
+  display: "flex",
+  alignItems: "center",
+  flexWrap: "wrap" as const,
+  gap: "6px",
+};
+
+const pageLinkStyle = {
+  padding: "8px 11px",
+  borderRadius: "8px",
+  border: "1px solid #cbd5e1",
+  color: "#0f172a",
+  background: "#ffffff",
+  textDecoration: "none",
+  fontWeight: 700,
+};
+
+const activePageStyle = {
+  ...pageLinkStyle,
+  color: "#ffffff",
+  background: "#0f172a",
+  borderColor: "#0f172a",
+};
+
+const disabledPageStyle = {
+  ...pageLinkStyle,
+  color: "#94a3b8",
+  background: "#f1f5f9",
+  pointerEvents: "none" as const,
+};
+
+const ellipsisStyle = {
+  padding: "8px 3px",
+  color: "#64748b",
 };
 
 const linkStyle = {

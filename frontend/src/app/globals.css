@@ -55,7 +55,15 @@ a {
   .dashboard-actions {
     width: 100%;
     display: grid !important;
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px !important;
+  }
+
+  .dashboard-actions a {
+    padding: 10px 7px !important;
+    text-align: center;
+    font-size: 12px;
+    line-height: 1.2;
   }
 
   .dashboard-summary-grid {
@@ -67,6 +75,10 @@ a {
   }
 
   .dashboard-panel-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  .dashboard-insight-grid {
     grid-template-columns: 1fr !important;
   }
 
@@ -100,6 +112,47 @@ a {
   }
 
   .manual-row {
+    grid-template-columns: 1fr !important;
+  }
+
+  .trend-panel {
+    padding: 16px 10px !important;
+  }
+
+  .trend-legend {
+    gap: 7px !important;
+  }
+
+  .trend-chart {
+    gap: 4px !important;
+    height: 220px !important;
+  }
+
+  .recent-row {
+    grid-template-columns: 62px 1fr auto !important;
+    gap: 7px !important;
+  }
+
+  .recent-row .recent-title {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  .recent-row time {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 390px) {
+  .dashboard-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .dashboard-actions a:first-child {
+    grid-column: 1 / -1;
+  }
+
+  .source-summary-grid {
     grid-template-columns: 1fr !important;
   }
 }

@@ -14,6 +14,7 @@ type Ticket = {
   assigned_to?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
+  latest_at?: string | null;
 };
 
 type DashboardSummary = {
@@ -23,6 +24,19 @@ type DashboardSummary = {
   closed: number;
   open_zabbix: number;
   manual_pending: number;
+};
+
+type DashboardAnalytics = {
+  monthly_trend: Array<{
+    month_key: string;
+    total: number;
+    zabbix: number;
+    manual: number;
+  }>;
+  top_risk_hosts: Array<{ host: string; alerts: number }>;
+  severity_summary: Array<{ severity: string; count: number }>;
+  source_summary: { total: number; zabbix: number; manual: number };
+  recent_activity: Ticket[];
 };
 
 type RiskLevel = "critical" | "high" | "medium";
@@ -73,6 +87,20 @@ function pct(value: number, max: number) {
 
 function q(value: string) {
   return encodeURIComponent(value);
+}
+
+function formatLatest(value?: string | null) {
+  if (!value) return "Unknown";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Unknown";
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Bangkok",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
 }
 
 function severityRank(sev?: string | null) {
@@ -226,10 +254,32 @@ async function getSummary(): Promise<DashboardSummary> {
   }
 }
 
+async function getAnalytics(): Promise<DashboardAnalytics> {
+  const empty: DashboardAnalytics = {
+    monthly_trend: [],
+    top_risk_hosts: [],
+    severity_summary: [],
+    source_summary: { total: 0, zabbix: 0, manual: 0 },
+    recent_activity: [],
+  };
+
+  try {
+    const res = await authenticatedApiFetch("/api/dashboard/analytics", {
+      cache: "no-store",
+    });
+    if (!res.ok) return empty;
+    return await res.json();
+  } catch (err) {
+    console.error("Failed to fetch dashboard analytics", err);
+    return empty;
+  }
+}
+
 export default async function DashboardPage() {
-  const [tickets, summary] = await Promise.all([
+  const [tickets, summary, analytics] = await Promise.all([
     getTickets(),
     getSummary(),
+    getAnalytics(),
   ]);
 
   const total = summary.total;
@@ -237,7 +287,7 @@ export default async function DashboardPage() {
   const inProgressCount = summary.in_progress;
   const closedCount = summary.closed;
 
-  const zabbixTickets = tickets.filter((t) => t.source === "slack_zabbix");
+  const zabbixTickets = tickets.filter((t) => ["zabbix", "slack_zabbix"].includes(t.source || ""));
   const zabbixThisMonth = zabbixTickets.filter((t) => isCurrentMonth(t.created_at));
 
   const openZabbix = zabbixTickets.filter((t) => t.status !== "Closed");
@@ -255,15 +305,11 @@ export default async function DashboardPage() {
     zabbixThisMonth.map((t) => `${normalizeHost(t.host)} | ${cleanTitle(t.title)}`)
   );
 
-  const hostCounts = countBy(
-    zabbixThisMonth.map((t) => normalizeHost(t.host))
-  );
-
   const topAlerts = topEntries(alertCounts, 6);
-  const topHosts = topEntries(hostCounts, 6);
+  const topHosts = analytics.top_risk_hosts.slice(0, 6);
 
   const maxAlert = topAlerts[0]?.[1] || 0;
-  const maxHost = topHosts[0]?.[1] || 0;
+  const maxHost = topHosts[0]?.alerts || 0;
 
   const repeatedRisk = topAlerts.filter(([, count]) => count >= 3).length;
   const openManualRisk = summary.manual_pending;
@@ -313,7 +359,7 @@ export default async function DashboardPage() {
             level={repeatedRisk > 0 ? "warning" : "ok"}
           />
         </a>
-        <a href="/tickets?source=slack_zabbix&status_not=Closed" style={plainLink}>
+        <a href="/tickets?source=zabbix&status_not=Closed" style={plainLink}>
           <RiskCard
             title="Open Zabbix Cases"
             value={openZabbixRisk}
@@ -348,7 +394,7 @@ export default async function DashboardPage() {
                 <p style={panelSubTitle}>What alert happens most often and on which host</p>
               </div>
             </div>
-            <a href="/tickets?source=slack_zabbix" style={smallLink}>Open tickets →</a>
+            <a href="/tickets?source=zabbix" style={smallLink}>Open tickets →</a>
           </div>
 
           {topAlerts.length === 0 ? (
@@ -368,7 +414,7 @@ export default async function DashboardPage() {
                     host={host}
                     count={count}
                     percent={pct(count, maxAlert)}
-                    href={`/tickets?source=slack_zabbix&host=${q(host)}&title=${q(title.toLowerCase())}`}
+                    href={`/tickets?source=zabbix&host=${q(host)}&title=${q(title.toLowerCase())}`}
                     styleData={style}
                     type="alert"
                   />
@@ -400,7 +446,7 @@ export default async function DashboardPage() {
             <EmptyText text="No host alert data this month." />
           ) : (
             <div style={{ display: "grid", gap: "12px" }}>
-              {topHosts.map(([host, count], index) => {
+              {topHosts.map(({ host, alerts: count }, index) => {
                 const level = riskLevel(count, index);
                 const style = riskStyle(level);
 
@@ -412,7 +458,7 @@ export default async function DashboardPage() {
                     host="Zabbix monitored host"
                     count={count}
                     percent={pct(count, maxHost)}
-                    href={`/tickets?source=slack_zabbix&host=${q(host)}`}
+                    href={`/tickets?source=zabbix&host=${q(host)}`}
                     styleData={style}
                     type="host"
                   />
@@ -423,7 +469,14 @@ export default async function DashboardPage() {
         </div>
       </section>
 
-        <ZabbixMonthlyTrend />
+      <ZabbixMonthlyTrend data={analytics.monthly_trend} />
+
+      <section className="dashboard-insight-grid" style={insightGrid}>
+        <SeveritySummary items={analytics.severity_summary} />
+        <SourceSummary data={analytics.source_summary} />
+      </section>
+
+      <RecentActivity tickets={analytics.recent_activity} />
 
 
       <section style={panel}>
@@ -473,6 +526,89 @@ export default async function DashboardPage() {
         )}
       </section>
     </main>
+  );
+}
+
+function SeveritySummary({ items }: { items: DashboardAnalytics["severity_summary"] }) {
+  const colors: Record<string, string> = {
+    Critical: "#dc2626",
+    High: "#ea580c",
+    Average: "#f59e0b",
+    Warning: "#eab308",
+    Information: "#2563eb",
+    Unknown: "#64748b",
+  };
+  const max = Math.max(...items.map((item) => item.count), 1);
+
+  return (
+    <section className="dashboard-panel" style={panel}>
+      <h2 style={panelTitle}>Severity Summary</h2>
+      <p style={panelSubTitle}>Tickets created this month by severity</p>
+      <div style={{ display: "grid", gap: "12px", marginTop: "18px" }}>
+        {items.map((item) => (
+          <div key={item.severity}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: "10px", fontSize: "13px", fontWeight: 900 }}>
+              <span>{item.severity}</span><span>{item.count.toLocaleString()}</span>
+            </div>
+            <div style={barBg}>
+              <div style={{ height: "100%", width: `${(item.count / max) * 100}%`, borderRadius: "999px", background: colors[item.severity] }} />
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function SourceSummary({ data }: { data: DashboardAnalytics["source_summary"] }) {
+  const sources = [
+    { label: "Zabbix", count: data.zabbix, color: "#f97316" },
+    { label: "Manual", count: data.manual, color: "#2563eb" },
+  ];
+
+  return (
+    <section className="dashboard-panel" style={panel}>
+      <h2 style={panelTitle}>Ticket Source Summary</h2>
+      <p style={panelSubTitle}>Tickets created this month by source</p>
+      <div className="source-summary-grid" style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: "12px", marginTop: "18px" }}>
+        {sources.map((source) => {
+          const percent = data.total ? (source.count / data.total) * 100 : 0;
+          return (
+            <div key={source.label} style={{ ...summaryCard, boxShadow: "none" }}>
+              <div style={{ color: "#475569", fontSize: "14px", fontWeight: 800 }}>{source.label}</div>
+              <div style={{ fontSize: "28px", fontWeight: 900, marginTop: "8px" }}>{source.count.toLocaleString()}</div>
+              <div style={{ color: source.color, fontWeight: 900, marginTop: "4px" }}>{percent.toFixed(1)}%</div>
+              <div style={barBg}><div style={{ height: "100%", width: `${percent}%`, borderRadius: "999px", background: source.color }} /></div>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ marginTop: "12px", color: "#64748b", fontSize: "13px" }}>Total this month: <b>{data.total.toLocaleString()}</b></div>
+    </section>
+  );
+}
+
+function RecentActivity({ tickets }: { tickets: Ticket[] }) {
+  return (
+    <section className="dashboard-panel recent-panel" style={{ ...panel, marginBottom: "20px" }}>
+      <div style={panelHeader}>
+        <div><h2 style={panelTitle}>Recent Activity</h2><p style={panelSubTitle}>Recently created or updated tickets</p></div>
+        <a href="/tickets" style={smallLink}>View all →</a>
+      </div>
+      {tickets.length === 0 ? <EmptyText text="No recent ticket activity." /> : (
+        <div style={{ display: "grid", gap: "9px" }}>
+          {tickets.map((ticket) => (
+            <a key={ticket.id} href={`/tickets/${ticket.id}`} className="recent-row" style={recentRow}>
+              <b>#{ticket.id}</b>
+              <span style={{ fontWeight: 800 }}>{normalizeHost(ticket.host)}</span>
+              <span className="recent-title" style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{ticket.title || "Untitled"}</span>
+              <span style={{ justifySelf: "start", padding: "5px 9px", borderRadius: "999px", fontSize: "12px", ...badgeStyle(ticket.status) }}>{ticket.status || "Unknown"}</span>
+              <time style={{ color: "#64748b", fontSize: "12px" }}>{formatLatest(ticket.latest_at || ticket.updated_at || ticket.created_at)}</time>
+            </a>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -724,6 +860,13 @@ const panelGrid = {
   marginBottom: "20px",
 };
 
+const insightGrid = {
+  display: "grid",
+  gridTemplateColumns: "1.2fr 0.8fr",
+  gap: "14px",
+  marginBottom: "20px",
+};
+
 const primaryButton = {
   padding: "12px 16px",
   borderRadius: "12px",
@@ -831,6 +974,19 @@ const manualRow = {
   padding: "14px",
   border: "1px solid #e2e8f0",
   borderRadius: "14px",
+  textDecoration: "none",
+  color: "#0f172a",
+  background: "#ffffff",
+};
+
+const recentRow = {
+  display: "grid",
+  gridTemplateColumns: "72px 150px minmax(180px, 1fr) 110px 165px",
+  gap: "12px",
+  alignItems: "center",
+  padding: "12px",
+  border: "1px solid #e2e8f0",
+  borderRadius: "12px",
   textDecoration: "none",
   color: "#0f172a",
   background: "#ffffff",
