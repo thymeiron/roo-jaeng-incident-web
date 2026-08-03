@@ -1,6 +1,7 @@
 # env / secrets
 .env
 .env.*
+!.env.example
 *.key
 *.pem
 *.crt
@@ -42,6 +43,8 @@ data/
 
 # dump/archive files
 *.sql
+!migrations/
+!migrations/*.sql
 *.dump
 *.tar
 *.tar.gz
@@ -58,6 +61,7 @@ token_*
 token_*
 .env
 .env.*
+!.env.example
 
 # PostgreSQL data
 postgres/

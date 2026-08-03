@@ -2,7 +2,9 @@
 
 import { useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
+import Link from "next/link";
 import LogoutButton from "./LogoutButton";
+import NotificationSettings from "./NotificationSettings";
 
 type UserData = {
   id: number;
@@ -47,12 +49,12 @@ export default function AuthHeader() {
   }
 
   return (
-    <header style={styles.header}>
-      <a href="/" style={styles.brand}>
+    <header className="auth-header" style={styles.header}>
+      <Link href="/" style={styles.brand}>
         Roo-Jaeng
-      </a>
+      </Link>
 
-      <div style={styles.right}>
+      <div className="auth-header-actions" style={styles.right}>
         {user ? (
           <div style={styles.user}>
             <span style={styles.username}>{user.username}</span>
@@ -62,6 +64,7 @@ export default function AuthHeader() {
           <span style={styles.loading}>Checking session...</span>
         )}
 
+        <NotificationSettings />
         <LogoutButton />
       </div>
     </header>
@@ -75,7 +78,7 @@ const styles = {
     alignItems: "center",
     justifyContent: "space-between",
     gap: "16px",
-    padding: "0 24px",
+    padding: "10px 24px",
     borderBottom: "1px solid #e2e8f0",
     background: "#ffffff",
     boxShadow: "0 4px 18px rgba(15,23,42,0.05)",
@@ -89,7 +92,10 @@ const styles = {
   right: {
     display: "flex",
     alignItems: "center",
+    flexWrap: "wrap" as const,
+    justifyContent: "flex-end",
     gap: "12px",
+    minWidth: 0,
   },
   user: {
     display: "flex",

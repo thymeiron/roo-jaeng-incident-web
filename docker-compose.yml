@@ -22,7 +22,7 @@ services:
     working_dir: /app
     volumes:
       - ./app:/app
-    command: bash -c "pip install fastapi uvicorn psycopg2-binary sqlalchemy && uvicorn main:app --host 0.0.0.0 --port 8000"
+    command: bash -c "pip install -r requirements.txt && uvicorn main:app --host 0.0.0.0 --port 8000"
     environment:
       DB_HOST: postgres
       DB_NAME: ${DB_NAME}
@@ -36,6 +36,10 @@ services:
       LINE_ENABLED: ${LINE_ENABLED:-false}
       ZABBIX_WEBHOOK_TOKEN: ${ZABBIX_WEBHOOK_TOKEN}
       ROO_JAENG_BASE_URL: ${ROO_JAENG_BASE_URL:-https://roo-jaeng.com}
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
+      VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
+      VAPID_SUBJECT: ${VAPID_SUBJECT:-}
+      WEB_PUSH_ENABLED: ${WEB_PUSH_ENABLED:-true}
     depends_on:
       - postgres
     networks:

@@ -1,0 +1,5 @@
+fastapi
+uvicorn
+psycopg2-binary
+sqlalchemy
+pywebpush==2.1.2

@@ -1,0 +1,4 @@
+-r requirements.txt
+httpx
+pytest
+eval-type-backport; python_version < "3.10"
