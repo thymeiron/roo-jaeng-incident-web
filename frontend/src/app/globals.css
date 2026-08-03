@@ -24,6 +24,107 @@ a {
   color: inherit;
 }
 
+.notification-settings {
+  flex: 0 0 auto;
+}
+
+.notification-settings-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  padding: max(12px, env(safe-area-inset-top)) 12px
+    max(12px, env(safe-area-inset-bottom));
+  overflow-y: auto;
+  background: rgba(15, 23, 42, 0.48);
+  pointer-events: auto;
+}
+
+.notification-settings-panel {
+  position: relative;
+  width: min(100%, 480px);
+  max-width: calc(100vw - 24px);
+  max-height: calc(100dvh - 24px);
+  margin: auto;
+  padding: 20px;
+  overflow-y: auto;
+  box-sizing: border-box;
+  border: 1px solid #cbd5e1;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 16px 40px rgba(15, 23, 42, 0.24);
+  color: #334155;
+  font-size: 13px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  pointer-events: auto;
+}
+
+.notification-settings-title {
+  display: block;
+  padding-right: 40px;
+  margin-bottom: 8px;
+  color: #0f172a;
+  font-size: 16px;
+}
+
+.notification-settings-close {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: block;
+  width: 40px;
+  height: 40px;
+  margin-right: 0;
+  margin-bottom: -40px;
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #334155;
+  font-size: 28px;
+  line-height: 1;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.notification-settings-close:hover {
+  background: #f1f5f9;
+}
+
+.notification-settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.notification-settings-actions button {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+@media (max-width: 479px) {
+  .notification-settings-actions button {
+    width: 100%;
+  }
+
+  .auth-header {
+    align-items: flex-start !important;
+    flex-wrap: wrap;
+    gap: 10px !important;
+    padding: 10px 12px !important;
+  }
+
+  .auth-header-actions {
+    width: 100%;
+  }
+}
+
 .dashboard-page {
   color: #0f172a;
 }

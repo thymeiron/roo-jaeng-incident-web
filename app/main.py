@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import re
 import os
 import json
@@ -9,15 +11,16 @@ import base64
 import logging
 import urllib.error
 import urllib.request
+from urllib.parse import urlparse
 from datetime import timedelta
 from datetime import datetime
 
 from fastapi import FastAPI, Request, Response, HTTPException, Depends, Cookie
 from fastapi.responses import PlainTextResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey, Float, JSON, text, or_, cast, func
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 
 DB_HOST = os.getenv("DB_HOST")
@@ -25,16 +28,20 @@ DB_NAME = os.getenv("DB_NAME")
 DB_USER = os.getenv("DB_USER")
 DB_PASS = os.getenv("DB_PASS")
 
-DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}/{DB_NAME}"
+DATABASE_URL = os.getenv("DATABASE_URL") or f"postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}/{DB_NAME}"
 
-engine = create_engine(
-    DATABASE_URL,
-    pool_pre_ping=True,
-    pool_recycle=60,
-    pool_size=5,
-    max_overflow=5,
-    pool_timeout=10,
-)
+engine_options = {"pool_pre_ping": True}
+if DATABASE_URL.startswith("sqlite"):
+    engine_options["connect_args"] = {"check_same_thread": False}
+else:
+    engine_options.update({
+        "pool_recycle": 60,
+        "pool_size": 5,
+        "max_overflow": 5,
+        "pool_timeout": 10,
+    })
+
+engine = create_engine(DATABASE_URL, **engine_options)
 
 SessionLocal = sessionmaker(
     bind=engine,
@@ -108,6 +115,19 @@ class SessionDB(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.now)
 
 
+class PushSubscriptionDB(Base):
+    __tablename__ = "push_subscriptions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    endpoint = Column(Text, unique=True, nullable=False)
+    p256dh = Column(Text, nullable=False)
+    auth = Column(Text, nullable=False)
+    user_agent = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+    updated_at = Column(DateTime, nullable=False, default=datetime.now)
+
+
 class CommentDB(Base):
     __tablename__ = "comments"
 
@@ -154,6 +174,20 @@ class AssignUpdate(BaseModel):
 class CommentCreate(BaseModel):
     comment: str
     created_by: str = "IDS Support"
+
+
+class PushSubscriptionKeys(BaseModel):
+    p256dh: str = Field(min_length=16, max_length=1024)
+    auth: str = Field(min_length=8, max_length=512)
+
+
+class PushSubscriptionRequest(BaseModel):
+    endpoint: str = Field(min_length=12, max_length=4096)
+    keys: PushSubscriptionKeys
+
+
+class PushUnsubscribeRequest(BaseModel):
+    endpoint: str = Field(min_length=12, max_length=4096)
 
 
 def verify_slack_signature(
@@ -335,6 +369,140 @@ def send_recovery_notification(ticket: TicketDB, event: dict) -> bool:
         f"Duration: {format_ticket_duration(ticket)}\n"
         f"{ticket_url(ticket.id)}"
     )
+
+
+def web_push_enabled() -> bool:
+    return os.getenv("WEB_PUSH_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def validate_push_endpoint(endpoint: str) -> str:
+    value = endpoint.strip()
+    parsed = urlparse(value)
+    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+        raise HTTPException(status_code=422, detail="Push endpoint must be a valid HTTPS URL")
+    return value
+
+
+def validate_push_key(value: str, name: str, minimum_length: int) -> str:
+    clean = value.strip()
+    if len(clean) < minimum_length or not re.fullmatch(r"[A-Za-z0-9_-]+={0,2}", clean):
+        raise HTTPException(status_code=422, detail=f"Invalid Push subscription {name}")
+    return clean
+
+
+def send_web_push_notification(
+    db: Session,
+    subscriptions: list[PushSubscriptionDB],
+    payload: dict,
+) -> dict:
+    """Best-effort delivery. A push failure must never affect the ticket transaction."""
+    if not web_push_enabled():
+        return {"sent": 0, "failed": 0, "expired": 0, "disabled": True}
+
+    private_key = os.getenv("VAPID_PRIVATE_KEY", "").strip()
+    subject = os.getenv("VAPID_SUBJECT", "").strip()
+    if not private_key or not subject:
+        logger.warning("Web Push skipped: VAPID_PRIVATE_KEY or VAPID_SUBJECT is not configured")
+        return {"sent": 0, "failed": len(subscriptions), "expired": 0}
+
+    try:
+        from pywebpush import WebPushException, webpush
+    except ImportError:
+        logger.error("Web Push skipped: pywebpush is not installed")
+        return {"sent": 0, "failed": len(subscriptions), "expired": 0}
+
+    result = {"sent": 0, "failed": 0, "expired": 0}
+    for subscription in subscriptions:
+        try:
+            webpush(
+                subscription_info={
+                    "endpoint": subscription.endpoint,
+                    "keys": {
+                        "p256dh": subscription.p256dh,
+                        "auth": subscription.auth,
+                    },
+                },
+                data=json.dumps(payload, ensure_ascii=False),
+                vapid_private_key=private_key,
+                vapid_claims={"sub": subject},
+                ttl=300,
+            )
+            result["sent"] += 1
+        except WebPushException as exc:
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if status_code in {404, 410}:
+                db.delete(subscription)
+                result["expired"] += 1
+                logger.warning(
+                    "Removed expired Web Push subscription id=%s status=%s",
+                    subscription.id,
+                    status_code,
+                )
+            else:
+                result["failed"] += 1
+                logger.warning(
+                    "Web Push delivery failed for subscription id=%s status=%s error=%s",
+                    subscription.id,
+                    status_code,
+                    type(exc).__name__,
+                )
+        except Exception as exc:
+            result["failed"] += 1
+            logger.warning(
+                "Web Push delivery failed for subscription id=%s error=%s",
+                subscription.id,
+                type(exc).__name__,
+            )
+
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.error("Could not remove expired Web Push subscriptions: %s", type(exc).__name__)
+    return result
+
+
+PUSH_TRIGGER_MAX_LENGTH = 70
+
+
+def compact_push_trigger(value: object) -> str:
+    trigger = " ".join(str(value or "Zabbix alert").split())
+    if len(trigger) <= PUSH_TRIGGER_MAX_LENGTH:
+        return trigger
+    return trigger[: PUSH_TRIGGER_MAX_LENGTH - 1].rstrip() + "…"
+
+
+def ticket_push_payload(ticket: TicketDB, event: dict, recovered: bool = False) -> dict:
+    host = str(event.get("host") or ticket.host or "-")
+    event_name = compact_push_trigger(event.get("event_name") or ticket.title)
+    severity = str(event.get("severity") or ticket.severity or "Unknown")
+    return {
+        "title": "✅ Recovered" if recovered else "🔴 Problem",
+        "body": (
+            f"{host} | {event_name} normal"
+            if recovered
+            else f"{host} | {severity} | {event_name}"
+        ),
+        "data": {"url": f"/tickets/{ticket.id}"},
+    }
+
+
+def send_ticket_web_push(db: Session, ticket: TicketDB, event: dict, recovered: bool = False) -> dict:
+    try:
+        subscriptions = db.query(PushSubscriptionDB).all()
+        return send_web_push_notification(
+            db,
+            subscriptions,
+            ticket_push_payload(ticket, event, recovered=recovered),
+        )
+    except Exception as exc:
+        db.rollback()
+        logger.error(
+            "Web Push processing failed after ticket commit: %s",
+            type(exc).__name__,
+        )
+        return {"sent": 0, "failed": 1, "expired": 0}
+
 
 def extract_slack_message_text(event: dict) -> str:
     parts = []
@@ -1245,8 +1413,14 @@ async def zabbix_webhook(request: Request):
             closed = close_tickets(db, [ticket], str(payload.get("detail", "")), recovery)
             if not closed:
                 return {"ok": True, "action": "already_closed", "ticket_id": ticket.id, "line_sent": False}
-            line_sent = send_recovery_notification(ticket, payload)
-            return {"ok": True, "action": "closed", "ticket_id": ticket.id, "line_sent": line_sent}
+            push = send_ticket_web_push(db, ticket, payload, recovered=True)
+            return {
+                "ok": True,
+                "action": "closed",
+                "ticket_id": ticket.id,
+                "line_sent": False,
+                "push": push,
+            }
 
         status_values = {str(payload.get("event_status", "")).upper(), str(payload.get("event_value", "")).upper()}
         if "PROBLEM" not in status_values and "1" not in status_values:
@@ -1264,8 +1438,14 @@ async def zabbix_webhook(request: Request):
         )
         if duplicate:
             return {"ok": True, "duplicate": True, "ticket_id": ticket.id, "line_sent": False}
-        line_sent = send_problem_notification(ticket, payload)
-        return {"ok": True, "action": "created", "ticket_id": ticket.id, "line_sent": line_sent}
+        push = send_ticket_web_push(db, ticket, payload)
+        return {
+            "ok": True,
+            "action": "created",
+            "ticket_id": ticket.id,
+            "line_sent": False,
+            "push": push,
+        }
     except HTTPException:
         db.rollback()
         raise
@@ -1670,6 +1850,163 @@ def auth_me(
     }
 
 
+@app.get("/api/push/public-key")
+def push_public_key(
+    user: UserDB = Depends(require_user),
+):
+    public_key = os.getenv("VAPID_PUBLIC_KEY", "").strip()
+    if not web_push_enabled():
+        raise HTTPException(status_code=503, detail="Web Push is disabled")
+    if not public_key:
+        raise HTTPException(status_code=503, detail="VAPID public key is not configured")
+    return {"public_key": public_key}
+
+
+@app.get("/api/push/status")
+def push_status(
+    user: UserDB = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    count = (
+        db.query(PushSubscriptionDB)
+        .filter(PushSubscriptionDB.user_id == user.id)
+        .count()
+    )
+    return {
+        "supported": web_push_enabled(),
+        "subscribed": count > 0,
+        "subscription_count": count,
+    }
+
+
+@app.post("/api/push/subscribe")
+def push_subscribe(
+    payload: PushSubscriptionRequest,
+    request: Request,
+    user: UserDB = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    endpoint = validate_push_endpoint(payload.endpoint)
+    p256dh = validate_push_key(payload.keys.p256dh, "p256dh", 16)
+    auth_key = validate_push_key(payload.keys.auth, "auth", 8)
+    subscription = (
+        db.query(PushSubscriptionDB)
+        .filter(PushSubscriptionDB.endpoint == endpoint)
+        .first()
+    )
+    now = datetime.now()
+    if subscription:
+        subscription.user_id = user.id
+        subscription.p256dh = p256dh
+        subscription.auth = auth_key
+        subscription.user_agent = request.headers.get("user-agent", "")[:512] or None
+        subscription.updated_at = now
+    else:
+        subscription = PushSubscriptionDB(
+            user_id=user.id,
+            endpoint=endpoint,
+            p256dh=p256dh,
+            auth=auth_key,
+            user_agent=request.headers.get("user-agent", "")[:512] or None,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(subscription)
+
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        subscription = (
+            db.query(PushSubscriptionDB)
+            .filter(PushSubscriptionDB.endpoint == endpoint)
+            .first()
+        )
+        if not subscription:
+            logger.error(
+                "Could not resolve Web Push subscription conflict for user_id=%s",
+                user.id,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail="Backend could not save Push subscription",
+            )
+        subscription.user_id = user.id
+        subscription.p256dh = p256dh
+        subscription.auth = auth_key
+        subscription.user_agent = request.headers.get("user-agent", "")[:512] or None
+        subscription.updated_at = now
+        try:
+            db.commit()
+        except SQLAlchemyError as exc:
+            db.rollback()
+            logger.error(
+                "Could not upsert Web Push subscription for user_id=%s error=%s",
+                user.id,
+                type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail="Backend could not save Push subscription",
+            ) from exc
+    except SQLAlchemyError as exc:
+        db.rollback()
+        logger.error(
+            "Could not save Web Push subscription for user_id=%s error=%s",
+            user.id,
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Backend could not save Push subscription",
+        ) from exc
+    db.refresh(subscription)
+    return {"ok": True, "subscription_id": subscription.id}
+
+
+@app.post("/api/push/unsubscribe")
+def push_unsubscribe(
+    payload: PushUnsubscribeRequest,
+    user: UserDB = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    endpoint = validate_push_endpoint(payload.endpoint)
+    deleted = (
+        db.query(PushSubscriptionDB)
+        .filter(
+            PushSubscriptionDB.endpoint == endpoint,
+            PushSubscriptionDB.user_id == user.id,
+        )
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    return {"ok": True, "unsubscribed": deleted > 0}
+
+
+@app.post("/api/push/test")
+def push_test(
+    user: UserDB = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    subscriptions = (
+        db.query(PushSubscriptionDB)
+        .filter(PushSubscriptionDB.user_id == user.id)
+        .all()
+    )
+    if not subscriptions:
+        raise HTTPException(status_code=404, detail="No Push subscription for this user")
+    result = send_web_push_notification(
+        db,
+        subscriptions,
+        {
+            "title": "🔔 Test",
+            "body": "Roo-Jaeng notification OK",
+            "data": {"url": "/"},
+        },
+    )
+    return {"ok": True, "push": result}
+
+
 # ============================================================
 # API_SECURITY_MIDDLEWARE_V1
 # ============================================================
@@ -1719,6 +2056,15 @@ async def api_security_middleware(request: Request, call_next):
     if not path.startswith("/api/"):
         return await call_next(request)
 
+    if path.startswith("/api/push/") and method == "POST":
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > 16_384:
+                    return JSONResponse(status_code=413, content={"detail": "Request body too large"})
+            except ValueError:
+                return JSONResponse(status_code=400, content={"detail": "Invalid Content-Length"})
+
     # Login/Logout และ Slack Webhook
     if path in PUBLIC_API_PATHS:
         return await call_next(request)
@@ -1736,7 +2082,11 @@ async def api_security_middleware(request: Request, call_next):
             )
 
         # Viewer อ่านได้อย่างเดียว
-        if method not in SAFE_METHODS and user.role != "admin":
+        if (
+            method not in SAFE_METHODS
+            and user.role != "admin"
+            and not path.startswith("/api/push/")
+        ):
             return JSONResponse(
                 status_code=403,
                 content={"detail": "Admin permission required"},
