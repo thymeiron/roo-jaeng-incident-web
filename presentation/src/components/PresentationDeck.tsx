@@ -1,40 +1,165 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { BrowserMockup, CreateTicketMockup, DashboardMockup, IphoneHomeMockup, LoginMockup, NotificationMockup, ReportsMockup, TicketDetailMockup, TicketsMockup, ZabbixRiskMockup } from "./MockScreens";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { slides } from "@/data/slides";
+import { Icon } from "./Icons";
+import AllScreensModal from "./AllScreensModal";
+import ProgressBar from "./ProgressBar";
+import SlideNavigation from "./SlideNavigation";
+import { SlideContent } from "./SlideContent";
 
-type Slide = { kicker: string; title: string; subtitle?: string; content: React.ReactNode; };
+const TRANSITION_MS = 420;
+const SWIPE_DISTANCE = 55;
 
-const steps = (items: string[]) => <ol className="steps">{items.map((item, i) => <li key={item}><span>{i + 1}</span><p>{item}</p></li>)}</ol>;
-const chips = (items: string[]) => <div className="feature-chips">{items.map(x => <span key={x}>✓ {x}</span>)}</div>;
+const parseHash = () => {
+  if (typeof window === "undefined") return 0;
+  const value = Number(window.location.hash.match(/^#slide-(\d+)$/)?.[1]);
+  return Number.isInteger(value) && value >= 1 && value <= slides.length ? value - 1 : 0;
+};
 
-const slides: Slide[] = [
-  { kicker: "ROO-JAENG INCIDENT MANAGEMENT", title: "จาก Alert สู่ Action", subtitle: "ระบบจัดการ Incident ที่เปลี่ยนทุกการแจ้งเตือนให้เป็นงานที่ติดตามได้", content: <div className="cover-visual"><div className="cover-logo">RJ</div><div className="flow-line"><span>Alert</span><i>→</i><span>Ticket</span><i>→</i><span>Action</span><i>→</i><span>Closed</span></div><p>แจ้งเตือน · มอบหมาย · ติดตาม · ปิดงาน — ในที่เดียว</p></div> },
-  { kicker: "01 · เริ่มต้นใช้งาน", title: "เข้าสู่ระบบ Roo-Jaeng", subtitle: "ใช้บัญชีที่ได้รับจากผู้ดูแลระบบ", content: <div className="split"><div className="copy-panel"><h3>วิธี Login</h3>{steps(["เปิดหน้า Roo-Jaeng", "กรอก Username และ Password", "กด Sign in เพื่อเข้าสู่ Dashboard"])}<div className="note">ผู้ใช้ใหม่อาจต้องเปลี่ยน Password ในการเข้าสู่ระบบครั้งแรก</div></div><LoginMockup/></div> },
-  { kicker: "02 · ภาพรวม", title: "Dashboard — เห็นสถานการณ์ในหน้าเดียว", subtitle: "เริ่มจากตัวเลขภาพรวม แล้วเจาะไปยังความเสี่ยงและกิจกรรมล่าสุด", content: <div className="screen-layout"><DashboardMockup/><div className="explain-strip">{chips(["Total / New / In Progress / Closed", "Monthly Trend", "Recent Activity", "Top Risk Hosts", "Repeated Alerts"])}</div></div> },
-  { kicker: "03 · จัดการงาน", title: "Tickets — ค้นหาและเปิดดูงาน", subtitle: "รวม Incident จากทุก Source พร้อมเครื่องมือกรองที่ใช้งานง่าย", content: <div className="screen-layout"><TicketsMockup/><div className="explain-strip">{chips(["Search", "Status", "Source", "Host", "Assigned user", "Pagination", "คลิก ID หรือ Title เพื่อเปิด Ticket"])}</div></div> },
-  { kicker: "04 · สร้างงาน", title: "Create Manual Ticket", subtitle: "สร้าง Ticket สำหรับงาน Support, Change หรือ Incident ที่ไม่ได้มาจาก Alert", content: <div className="split wide-copy"><div className="copy-panel"><h3>ข้อมูลที่ต้องระบุ</h3>{chips(["Title", "Host", "Severity", "Assigned To", "Detail"])}<div className="callout"><b>วิธี Save</b><p>ตรวจข้อมูลให้ครบ แล้วกด <strong>Create Ticket</strong> ระบบจะสร้างสถานะเริ่มต้นเป็น New</p></div></div><CreateTicketMockup/></div> },
-  { kicker: "05 · ติดตามงาน", title: "Ticket Detail — ทุกบริบทอยู่ที่เดียว", subtitle: "ดูรายละเอียด มอบหมาย บันทึกการทำงาน และเปลี่ยนสถานะได้จากหน้าเดียว", content: <div className="screen-layout"><TicketDetailMockup/><div className="status-flow"><span className="blue">New</span><i>→ เริ่มทำงาน →</i><span className="orange">In Progress</span><i>→ แก้ไขเสร็จ →</i><span className="green">Closed</span></div><div className="explain-strip">{chips(["Detail", "Assigned To", "Timeline", "Notes", "Work Log", "Related"])}</div></div> },
-  { kicker: "06 · รายงาน", title: "Reports — สรุป Incident รายเดือน", subtitle: "เห็นที่มาของ Ticket สถานะงาน และภาระงานของทีมอย่างชัดเจน", content: <div className="screen-layout"><ReportsMockup/><div className="explain-strip">{chips(["Monthly Incident Summary", "Ticket Source", "Status Summary", "งานของแต่ละคนในทีม"])}</div></div> },
-  { kicker: "07 · วิเคราะห์ความเสี่ยง", title: "Zabbix Risk — จับปัญหาที่เกิดซ้ำ", subtitle: "จัดกลุ่ม Alert แบบเดียวกันบน Host เดียวกัน เพื่อเห็น Pattern ที่ควรแก้ที่ต้นเหตุ", content: <div className="screen-layout"><ZabbixRiskMockup/><div className="explain-strip">{chips(["Repeated Alerts ตั้งแต่ 3 ครั้งขึ้นไป", "Top Risk Hosts", "กด View tickets เพื่อดูเหตุการณ์ทั้งหมด"])}</div></div> },
-  { kicker: "08 · Push Notification", title: "แจ้งเตือนแทน LINE", subtitle: "Alert สำคัญส่งตรงถึง iPhone และเปิด Roo-Jaeng ได้ทันที", content: <div className="notification-flow"><div className="flow-source"><div><span>⚡</span><b>Zabbix</b></div><div><span>◈</span><b>Commvault</b></div></div><i>→<small>ส่ง Alert</small></i><div className="flow-ticket"><span className="mini-logo">RJ</span><div><b>Roo-Jaeng</b><small>สร้าง Ticket อัตโนมัติ</small></div></div><i>→<small>Push</small></i><NotificationMockup/></div> },
-  { kicker: "09 · ติดตั้งบน iPhone", title: "เพิ่ม Roo-Jaeng ไปยัง Home Screen", subtitle: "Web Push บน iPhone ต้องเปิดผ่านแอปที่เพิ่มไว้บนหน้าจอโฮม", content: <div className="split iphone-split"><div className="copy-panel">{steps(["เปิด https://roo-jaeng.com ด้วย Safari", "Login", "กด Share", "เลือก Add to Home Screen", "กด Add", "เปิดจากไอคอน Roo-Jaeng บน Home Screen"])}<div className="warning">ไม่ใช้ Safari tab ปกติสำหรับตั้ง Notification</div></div><IphoneHomeMockup/></div> },
-  { kicker: "10 · เปิด Notification", title: "ตั้งค่าให้พร้อมรับ Push", subtitle: "ตรวจสถานะให้ครบก่อนส่งการแจ้งเตือนทดสอบ", content: <div className="split iphone-split"><div className="copy-panel compact-list">{steps(["เปิด Roo-Jaeng จาก Home Screen icon และ Login", "เปิด Notification Settings", "ตรวจ Browser support และ standalone mode = Yes", "กด Enable Notifications แล้วกด Allow", "ตรวจ Subscribed และ Registered device ≥ 1", "กด Test Notification", "คาดหวัง Successful 1, Failed 0", "สลับ Roo-Jaeng ไป Background", "กด Notification และตรวจว่าแอปเปิดขึ้นมา"])}<div className="note">หากพบ HTTP 401 ให้ Login ใหม่ แล้วทดสอบอีกครั้ง</div></div><NotificationMockup/></div> },
-  { kicker: "11 · แก้ปัญหา", title: "Troubleshooting Notification", subtitle: "เช็กตามลำดับจากอุปกรณ์ → การติดตั้ง → สิทธิ์ → Subscription", content: <div className="troubleshoot-grid">{[['1','อุปกรณ์','ใช้ iPhone ที่รองรับ Web Push'],['2','การติดตั้ง','Add to Home Screen และเปิดจากไอคอน'],['3','Permission','ต้องเป็น Allow'],['4','Session','HTTP 401 ให้ Login ใหม่'],['5','Subscription','ถ้ายังไม่ Subscribed กด Enable Notifications ใหม่'],['6','ทดสอบ','ใช้ Test Notification เพื่อตรวจสอบ']].map(([n,t,d])=><div key={n}><span>{n}</span><div><b>{t}</b><p>{d}</p></div></div>)}</div> },
-  { kicker: "12 · สรุป", title: "ทุก Alert กลายเป็นงานที่จัดการได้", subtitle: "Roo-Jaeng เชื่อมการแจ้งเตือนและการทำงานของทีมไว้ในระบบเดียว", content: <div className="summary-visual"><div className="summary-logo">RJ</div><div className="summary-points"><div><span>🔔</span><p><b>แทน LINE Notification</b><small>Push Alert ตรงถึงอุปกรณ์</small></p></div><div><span>🎫</span><p><b>ทุก Alert กลายเป็น Ticket</b><small>ไม่มีเหตุการณ์สำคัญตกหล่น</small></p></div><div><span>✓</span><p><b>Assign ติดตาม และปิดงาน</b><small>ทีมทำงานร่วมกันในที่เดียว</small></p></div></div></div> },
-];
+type Gesture = { x: number; y: number };
+type WebkitDocument = Document & { webkitFullscreenElement?: Element | null; webkitExitFullscreen?: () => Promise<void> | void };
+type WebkitElement = HTMLElement & { webkitRequestFullscreen?: () => Promise<void> | void };
 
 export default function PresentationDeck() {
-  const [index, setIndex] = useState(0);
+  const [current, setCurrent] = useState(0);
+  const [previous, setPrevious] = useState<number | null>(null);
+  const [direction, setDirection] = useState<"forward" | "backward">("forward");
   const [overview, setOverview] = useState(false);
-  const go = useCallback((next: number) => setIndex(Math.max(0, Math.min(slides.length - 1, next))), []);
-  useEffect(() => { const onKey = (e: KeyboardEvent) => { if (overview && e.key === "Escape") setOverview(false); else if (!overview && ["ArrowRight", "PageDown", " "].includes(e.key)) go(index + 1); else if (!overview && ["ArrowLeft", "PageUp"].includes(e.key)) go(index - 1); }; window.addEventListener("keydown", onKey); return () => window.removeEventListener("keydown", onKey); }, [go, index, overview]);
-  const slide = slides[index];
-  return <main className="deck-shell">
-    <div className="progress" style={{ "--progress": `${((index + 1) / slides.length) * 100}%` } as React.CSSProperties}/>
-    <header className="deck-header"><button className="brand-button" onClick={() => go(0)} aria-label="ไปหน้าปก"><span>RJ</span><b>Roo-Jaeng</b></button><button className="overview-button" onClick={() => setOverview(true)}><i className="grid-icon">▦</i> All Screens</button></header>
-    <article className={`slide slide-${index + 1}`} key={index}><div className="slide-heading"><span>{slide.kicker}</span><h1>{slide.title}</h1>{slide.subtitle && <p>{slide.subtitle}</p>}</div><div className="slide-content">{slide.content}</div></article>
-    <footer className="deck-footer"><button onClick={() => go(index - 1)} disabled={index === 0}>← <span>Back</span></button><div className="counter"><b>{String(index + 1).padStart(2,'0')}</b><span>/ {String(slides.length).padStart(2,'0')}</span></div><button className="next" onClick={() => go(index + 1)} disabled={index === slides.length - 1}><span>Next</span> →</button></footer>
-    {overview && <div className="overview" role="dialog" aria-modal="true" aria-label="ทุกสไลด์"><div className="overview-head"><div><span>ROO-JAENG PRESENTATION</span><h2>All Screens</h2></div><button onClick={() => setOverview(false)} aria-label="ปิด">×</button></div><div className="overview-grid">{slides.map((s,i)=><button key={s.title} className={i===index?'current':''} onClick={()=>{go(i);setOverview(false)}}><span>{String(i+1).padStart(2,'0')}</span><div><small>{s.kicker}</small><b>{s.title}</b></div></button>)}</div></div>}
+  const [fullscreen, setFullscreen] = useState(false);
+  const currentRef = useRef(0);
+  const transitionTimerRef = useRef<number | null>(null);
+  const touchRef = useRef<Gesture | null>(null);
+  const pointerRef = useRef<Gesture | null>(null);
+
+  const navigate = useCallback((target: number, historyMode: "push" | "replace" | "none" = "push") => {
+    const next = Math.max(0, Math.min(slides.length - 1, target));
+    const active = currentRef.current;
+    if (next === active) return;
+
+    if (transitionTimerRef.current !== null) window.clearTimeout(transitionTimerRef.current);
+    setDirection(next > active ? "forward" : "backward");
+    setPrevious(active);
+    currentRef.current = next;
+    setCurrent(next);
+    if (historyMode !== "none") {
+      window.history[historyMode === "push" ? "pushState" : "replaceState"]({ slide: next }, "", `#slide-${next + 1}`);
+    }
+    transitionTimerRef.current = window.setTimeout(() => {
+      setPrevious(null);
+      transitionTimerRef.current = null;
+    }, TRANSITION_MS);
+  }, []);
+
+  const finishSwipe = useCallback((start: Gesture | null, endX: number, endY: number) => {
+    if (!start || overview) return;
+    const dx = endX - start.x;
+    const dy = endY - start.y;
+    if (Math.abs(dx) >= SWIPE_DISTANCE && Math.abs(dx) > Math.abs(dy) * 1.25) {
+      navigate(currentRef.current + (dx < 0 ? 1 : -1));
+    }
+  }, [navigate, overview]);
+
+  useEffect(() => {
+    const initial = parseHash();
+    currentRef.current = initial;
+    setCurrent(initial);
+    window.history.replaceState({ slide: initial }, "", `#slide-${initial + 1}`);
+    const syncFromUrl = () => navigate(parseHash(), "none");
+    window.addEventListener("popstate", syncFromUrl);
+    window.addEventListener("hashchange", syncFromUrl);
+    return () => {
+      window.removeEventListener("popstate", syncFromUrl);
+      window.removeEventListener("hashchange", syncFromUrl);
+      if (transitionTimerRef.current !== null) window.clearTimeout(transitionTimerRef.current);
+    };
+  }, [navigate]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const element = event.target as HTMLElement | null;
+      if (element?.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(element?.tagName ?? "")) return;
+      if (overview) {
+        if (event.key === "Escape") setOverview(false);
+        return;
+      }
+      if (["ArrowRight", "PageDown", " ", "Spacebar"].includes(event.key)) {
+        event.preventDefault();
+        navigate(currentRef.current + 1);
+      } else if (["ArrowLeft", "PageUp"].includes(event.key)) {
+        event.preventDefault();
+        navigate(currentRef.current - 1);
+      } else if (event.key === "Home") {
+        event.preventDefault();
+        navigate(0);
+      } else if (event.key === "End") {
+        event.preventDefault();
+        navigate(slides.length - 1);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [navigate, overview]);
+
+  useEffect(() => {
+    const webkitDocument = document as WebkitDocument;
+    const onFullscreenChange = () => setFullscreen(Boolean(document.fullscreenElement ?? webkitDocument.webkitFullscreenElement));
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    document.addEventListener("webkitfullscreenchange", onFullscreenChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", onFullscreenChange);
+      document.removeEventListener("webkitfullscreenchange", onFullscreenChange);
+    };
+  }, []);
+
+  const toggleFullscreen = async () => {
+    const webkitDocument = document as WebkitDocument;
+    const root = document.documentElement as WebkitElement;
+    try {
+      if (document.fullscreenElement ?? webkitDocument.webkitFullscreenElement) {
+        if (document.exitFullscreen) await document.exitFullscreen();
+        else await webkitDocument.webkitExitFullscreen?.();
+      } else if (root.requestFullscreen) await root.requestFullscreen();
+      else await root.webkitRequestFullscreen?.();
+    } catch {
+      // Fullscreen can be denied by browser or device policy.
+    }
+  };
+
+  const selectSlide = (index: number) => {
+    setOverview(false);
+    navigate(index);
+  };
+
+  return <main className="presentation-deck"
+    onTouchStart={(event) => {
+      if ((event.target as Element).closest("button, input, textarea, select, a")) return;
+      const touch = event.changedTouches[0];
+      touchRef.current = { x: touch.clientX, y: touch.clientY };
+    }}
+    onTouchCancel={() => { touchRef.current = null; }}
+    onTouchEnd={(event) => {
+      const start = touchRef.current;
+      touchRef.current = null;
+      const touch = event.changedTouches[0];
+      finishSwipe(start, touch.clientX, touch.clientY);
+    }}
+    onPointerDown={(event) => {
+      if (event.pointerType === "touch" || (event.target as Element).closest("button, input, textarea, select, a")) return;
+      pointerRef.current = { x: event.clientX, y: event.clientY };
+    }}
+    onPointerCancel={() => { pointerRef.current = null; }}
+    onPointerUp={(event) => {
+      if (event.pointerType === "touch") return;
+      const start = pointerRef.current;
+      pointerRef.current = null;
+      finishSwipe(start, event.clientX, event.clientY);
+    }}>
+    <ProgressBar current={current} total={slides.length} />
+    <header className="deck-topbar"><button type="button" className="deck-brand" onClick={() => navigate(0)} aria-label="กลับสไลด์แรก"><span>RJ</span><div><b>Roo-Jaeng</b><small>Incident Management</small></div></button><div className="deck-actions"><button type="button" onClick={() => setOverview(true)}><Icon name="grid" /><span>All Screens</span></button><button type="button" onClick={toggleFullscreen} aria-label={fullscreen ? "ออกจากโหมดเต็มหน้าจอ" : "เปิดโหมดเต็มหน้าจอ"}><Icon name="expand" /><span>{fullscreen ? "Exit" : "Fullscreen"}</span></button></div></header>
+    <div className="slides-viewport" aria-live="polite">{previous !== null && <div className={`slide-frame slide-exit slide-exit--${direction}`} aria-hidden="true"><SlideContent id={previous + 1} /></div>}<div className={`slide-frame ${previous !== null ? `slide-enter slide-enter--${direction}` : ""}`}><SlideContent id={current + 1} /></div></div>
+    <SlideNavigation current={current} total={slides.length} onPrevious={() => navigate(currentRef.current - 1)} onNext={() => navigate(currentRef.current + 1)} />
+    {overview && <AllScreensModal current={current} onSelect={selectSlide} onClose={() => setOverview(false)} />}
+    <div className="keyboard-hint" aria-hidden="true">← → เพื่อเปลี่ยนสไลด์</div>
   </main>;
 }
