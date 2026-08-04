@@ -1,4 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="96" fill="#0f172a"/>
-  <text x="50%" y="53%" text-anchor="middle" dominant-baseline="middle" font-family="Arial, sans-serif" font-size="170" font-weight="700" fill="#ffffff">RJ</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">Roo-Jaeng</title>
+  <rect width="64" height="64" rx="18" fill="#2563eb"/>
+  <path d="M17 45V18h14c7 0 12 4 12 10 0 4-2 7-6 9l10 8H36l-8-7h-2v7H17Zm9-15h5c2 0 3-1 3-3s-1-3-3-3h-5v6Z" fill="white"/>
 </svg>

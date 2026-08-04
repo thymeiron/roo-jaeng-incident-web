@@ -1,4 +1,4 @@
-import PresentationDeck from "../components/PresentationDeck";
+import PresentationDeck from "@/components/PresentationDeck";
 
 export default function Home() {
   return <PresentationDeck />;
