@@ -18,6 +18,7 @@ h3 { line-height: 1.4; }
 p { color: var(--muted); }
 .container { width: min(1120px, calc(100% - 40px)); margin-inline: auto; }
 .section { padding-block: 80px; }
+.hero > *, .guides > *, .success-grid > *, .troubleshooting > *, .flow-cards > * { min-width: 0; overflow-wrap: anywhere; }
 .skip-link { position: fixed; top: -100px; left: 20px; z-index: 100; padding: 12px 20px; background: #fff; }
 .skip-link:focus { top: 12px; }
 .navbar { position: sticky; top: 0; z-index: 10; border-bottom: 1px solid var(--line); background: rgba(255,255,255,.96); }
@@ -54,7 +55,7 @@ h1 > span { color: var(--orange); }
 .notification-icon svg { width: 16px; height: 16px; }
 .notification-header small { margin-left: auto; color: var(--muted); font-size: 9px; }
 .notification-body { margin-top: 12px; font-size: 11px; }
-.notification-body h3 { font-size: 13px; margin-bottom: 8px; }
+.notification-body .notification-title { color: var(--ink); font-size: 13px; font-weight: 700; line-height: 1.4; margin-bottom: 8px; }
 .notification-body p { color: #475569; }
 .notification-message { margin-block: 5px 10px; overflow-wrap: anywhere; }
 .warning-text, .warning-symbol { color: var(--orange); }
@@ -80,7 +81,7 @@ h1 > span { color: var(--orange); }
 .guide-heading h3 { font-size: 27px; letter-spacing: -.025em; }
 .guide-heading > p:last-child { font-size: 14px; margin-top: 14px; }
 .steps { list-style: none; padding: 0; margin: 32px 0 0; }
-.guide-step { position: relative; display: grid; grid-template-columns: 32px 1fr; gap: 15px; padding-bottom: 26px; }
+.guide-step { position: relative; display: grid; grid-template-columns: 32px minmax(0, 1fr); gap: 15px; padding-bottom: 26px; }
 .guide-step:not(:last-child)::before { content: ""; position: absolute; left: 15px; top: 36px; bottom: 5px; width: 1px; background: var(--line); }
 .step-number { display: grid; place-items: center; width: 32px; height: 32px; border: 1px solid var(--line); background: #fafaf9; border-radius: 50%; font-size: 12px; color: #475569; }
 .guide-step h4 { font-size: 15px; line-height: 1.7; font-weight: 600; }
@@ -91,7 +92,7 @@ h1 > span { color: var(--orange); }
 .info-callout { display: flex; align-items: flex-start; gap: 12px; padding: 18px; border: 1px solid #fed7aa; background: var(--orange-soft); border-radius: 12px; color: #9a3412; font-size: 14px; }
 .info-callout p { color: #9a3412; font-size: 12px; line-height: 1.9; margin-top: 4px; }
 .enabled-preview { padding: 24px 12px; border: 1px solid var(--line); border-radius: 12px; text-align: center; background: #fafcfb; }
-.enabled-badge { display: inline-flex; align-items: center; gap: 7px; padding: 6px 12px; border-radius: 24px; background: #ecfdf5; color: #166534; font-size: 12px; font-weight: 600; }
+.enabled-badge { max-width: 100%; overflow-wrap: anywhere; display: inline-flex; align-items: center; gap: 7px; padding: 6px 12px; border-radius: 24px; background: #ecfdf5; color: #166534; font-size: 12px; font-weight: 600; }
 .enabled-badge svg { width: 16px; height: 16px; }
 .enabled-preview p { font-size: 11px; margin-top: 12px; }
 .success-section { background: #fafaf9; border-block: 1px solid var(--line); }
@@ -102,7 +103,7 @@ h1 > span { color: var(--orange); }
 .notification-incident { padding: 26px; box-shadow: 0 12px 30px #1e293b06; }
 .notification-incident .notification-header { font-size: 15px; }
 .notification-incident .notification-body { font-size: 13px; }
-.notification-incident h3 { font-size: 16px; }
+.notification-incident .notification-title { font-size: 16px; }
 .incident-link { display: flex; align-items: center; justify-content: space-between; color: var(--orange); font-weight: 600; border-top: 1px solid var(--line); margin-top: 20px; padding-top: 15px; }
 .incident-link:hover { text-decoration: underline; }
 .troubleshooting { display: grid; gap: 26px; }
@@ -133,7 +134,7 @@ h1 > span { color: var(--orange); }
 @media (max-width: 600px) {
   .nav-inner { flex-wrap: wrap; padding-block: 12px; gap: 10px; }
   .nav-links { display: contents; }
-  .nav-links > a:not(.button) { order: 2; width: calc(50% - 8px); text-align: center; padding-block: 6px; }
+  .nav-links > a:not(.button) { min-height: 44px; display: flex; align-items: center; justify-content: center; order: 2; width: calc(50% - 8px); text-align: center; padding-block: 6px; }
   .nav-links .button { margin-left: auto; font-size: 11px; padding: 9px 12px; min-height: 42px; }
   .brand-icon { width: 32px; height: 32px; border-radius: 9px; }
   .brand strong { font-size: 17px; }
