@@ -8,7 +8,7 @@ function Brand() {
 }
 
 export function Navbar() {
-  return <header className="navbar"><nav className="container nav-inner" aria-label="Main navigation"><a href="#top" aria-label="Roo-Jaeng homepage"><Brand /></a><div className="nav-links"><a href="#how-it-works">How it works</a><a href="#quick-guide">Quick Guide</a><a className="button button-small" href={appUrl}>Open Roo-Jaeng <Icon name="arrow-right" /></a></div></nav></header>;
+  return <header className="navbar"><nav className="container nav-inner" aria-label="Main navigation"><a href="#top" aria-label="Roo-Jaeng homepage"><Brand /></a><div className="nav-links"><a href="#how-it-works">How it works</a><a href="#quick-guide">Quick Guide</a><a href="#web-features">Features</a><a className="button button-small" href={appUrl}>Open Roo-Jaeng <Icon name="arrow-right" /></a></div></nav></header>;
 }
 
 function FlowLabel() {
@@ -64,6 +64,75 @@ export function QuickGuide() {
 
 export function Success() {
   return <section className="success-section section" aria-labelledby="success-title"><div className="container success-grid"><div><p className="eyebrow"><Icon name="check" /> YOU’RE ALL SET</p><h2 id="success-title">พร้อมรับ Alert</h2><p className="success-description">เมื่อ Zabbix ตรวจพบปัญหา Roo-Jaeng จะรับ Event ผ่าน Webhook และส่ง Notification ไปยัง iPhone ของผู้ใช้งาน</p><FlowLabel /></div><div className="success-preview"><p className="preview-label">ตัวอย่างการแจ้งเตือน</p><NotificationPreview incident /></div></div></section>;
+}
+
+export function WebFeatures() {
+  const features = [
+    {
+      icon: "grid" as const,
+      category: "OVERVIEW",
+      title: "Incident Dashboard",
+      description: "ดูภาพรวม Incident, Zabbix Alerts, Open Cases, Repeated Alerts และ Risk Hosts แบบรายเดือน",
+      keywords: ["Total Tickets · New / In Progress / Closed", "Open Zabbix Cases", "Repeated Zabbix Risk", "Top Zabbix Alerts", "Top Risk Hosts", "Recent Activity"],
+      path: "/",
+      cta: "Open Dashboard",
+    },
+    {
+      icon: "ticket" as const,
+      category: "INCIDENT WORKFLOW",
+      title: "Ticket Management",
+      description: "ค้นหาและติดตาม Incident, Assign ผู้รับผิดชอบ, เพิ่มรายละเอียด และเปลี่ยนสถานะของ Ticket",
+      keywords: ["Search tickets", "New / In Progress / Closed", "Assigned user", "Host / Detail", "Source", "Ticket status"],
+      path: "/tickets",
+      cta: "View Tickets",
+    },
+    {
+      icon: "chart" as const,
+      category: "TEAM REPORTING",
+      title: "Monthly Report",
+      description: "ดูสรุปงานรายเดือนของทีม ทั้ง Manual, Zabbix, จำนวนงาน, ชั่วโมงทำงาน และ Incident ที่เกิดซ้ำ",
+      keywords: ["Summary by Staff", "Manual / Zabbix", "New / In Progress / Closed", "Top Incidents", "Work count / hours"],
+      path: "/reports",
+      cta: "View Monthly Report",
+    },
+    {
+      icon: "plus" as const,
+      category: "MANUAL WORK ITEMS",
+      title: "Create Ticket",
+      description: "เปิด Incident หรือ Work Item แบบ Manual สำหรับงานที่ไม่ได้มาจาก Zabbix",
+      keywords: ["Manual incident", "Assign owner", "Add detail", "Track status"],
+      path: "/tickets/new",
+      cta: "Create Ticket",
+    },
+  ];
+
+  return (
+    <section id="web-features" className="container section web-features" aria-labelledby="web-features-title">
+      <div className="section-heading">
+        <p className="eyebrow">ROO-JAENG WEB APP</p>
+        <h2 id="web-features-title">More than Notifications</h2>
+        <p lang="th">นอกจากรับ Alert บน iPhone แล้ว Roo-Jaeng ยังใช้สำหรับติดตาม Incident, จัดการ Ticket และสรุปรายงานการทำงานได้ในที่เดียว</p>
+      </div>
+      <div className="web-features-grid">
+        {features.map((feature) => (
+          <article className="web-feature-card" key={feature.path}>
+            <div className="web-feature-heading">
+              <span className="outline-icon"><Icon name={feature.icon} /></span>
+              <p className="eyebrow">{feature.category}</p>
+            </div>
+            <h3>{feature.title}</h3>
+            <p className="web-feature-description" lang="th">{feature.description}</p>
+            <ul className="web-feature-keywords" aria-label={`${feature.title} features`}>
+              {feature.keywords.map((keyword) => <li key={keyword}>{keyword}</li>)}
+            </ul>
+            <a className="button button-small web-feature-cta" href={`${appUrl}${feature.path}`}>
+              {feature.cta}<Icon name="arrow-right" />
+            </a>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
 }
 
 export function Troubleshooting() {
